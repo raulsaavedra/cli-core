@@ -5,15 +5,15 @@ import { homedir } from "node:os";
 export function resolveSkillsDir(destDir) {
     if (destDir)
         return destDir;
+    const agentsHome = process.env.AGENTS_HOME;
+    if (agentsHome) {
+        return join(agentsHome, "skills");
+    }
     const codexHome = process.env.CODEX_HOME;
     if (codexHome) {
         return join(codexHome, "skills");
     }
-    const fallback = join(homedir(), ".codex", "skills");
-    if (existsSync(fallback)) {
-        return fallback;
-    }
-    throw new Error("Skill destination not found. Provide --dest or set CODEX_HOME.");
+    return join(homedir(), ".agents", "skills");
 }
 export function ensureSkillSource(srcDir) {
     const skillFile = join(srcDir, "SKILL.md");
