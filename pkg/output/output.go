@@ -19,8 +19,3 @@ func Success(format string, args ...any) {
 func Errorf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
-
-func Fatalf(format string, args ...any) {
-	Errorf(format, args...)
-	os.Exit(1)
-}
