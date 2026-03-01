@@ -1,7 +1,7 @@
 # cli-core
 
 Purpose:
-- Shared, reusable building blocks for Raul’s local CLIs (Bun/TypeScript).
+- Shared, reusable building blocks for Raul’s local CLIs (Go).
 - Consolidate common CLI patterns (SQLite bootstrap, output, JSON input).
 
 Scope:
@@ -18,13 +18,13 @@ API policy:
 - Prefer small, composable functions over large helpers.
 
 Error policy:
-- Helpers should throw `Error` and let callers decide how to render/exit.
+- Helpers should return `error` and let callers decide how to render/exit.
 - Avoid calling `os.Exit` in shared packages.
 
 Dependencies:
 - Keep dependencies minimal.
-- Prefer Bun and Node stdlib where possible.
+- Prefer Go stdlib where possible.
 
 Compatibility:
-- Works on Linux/macOS with Bun 1.2+.
+- Works on Linux/macOS with Go 1.24+.
 - Keep APIs stable for downstream CLIs.

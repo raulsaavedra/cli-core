@@ -1,11 +1,10 @@
 # cli-core
 
-Shared utilities for Raul’s CLI tools (Bun/TypeScript).
+Shared utilities for Raul’s CLI tools (Go).
 
 ## Local Development
 ```bash
-bun install
-bun run check
+go test ./...
 ```
 
 ## Modules
@@ -20,15 +19,13 @@ bun run check
 - `Truncate(text, max)`
 
 ### `pkg/jsoninput`
-- `Read(ReadOptions): string`
-  - Returns validated raw JSON text.
-  - Returns `"null"` when `AllowEmpty` is `true` and input is empty.
+- `Read(ReadOptions)`
 
 ### `pkg/output`
 - `JSON(v)`
 - `Success(format, ...)`
 - `Errorf(format, ...)`
-- `Fatalf(format, ...): never` (throws `Error`)
+- `Fatalf(format, ...)`
 
 ### `pkg/skills`
 - `ResolveSkillsDir(dest)`
@@ -38,7 +35,7 @@ bun run check
 - `DBPath(appName, filename)`
 - `EnsureDirForFile(path)`
 - `ApplyPragmas(db, pragmas)`
-- `OpenSQLite(OpenOptions): [Database, string]`
+- `OpenSQLite(OpenOptions)`
 
 ### `pkg/stdio`
 - `ReadStdin()`
