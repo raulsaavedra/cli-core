@@ -1,34 +1,29 @@
 {
   "name": "@raulsaavedra/cli-core",
-  "version": "0.1.0",
-  "description": "Shared CLI utilities for Raul's local tools",
-  "license": "MIT",
+  "version": "0.2.0",
+  "description": "Shared utilities for Raul's CLI tools (Bun/TypeScript).",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
+    ".": "./index.ts",
+    "./pkg/args": "./pkg/args/index.ts",
+    "./pkg/format": "./pkg/format/index.ts",
+    "./pkg/jsoninput": "./pkg/jsoninput/index.ts",
+    "./pkg/output": "./pkg/output/index.ts",
+    "./pkg/skills": "./pkg/skills/index.ts",
+    "./pkg/sqliteutil": "./pkg/sqliteutil/index.ts",
+    "./pkg/stdio": "./pkg/stdio/index.ts"
   },
-  "files": [
-    "dist"
-  ],
   "scripts": {
-    "build": "tsc",
-    "clean": "rm -rf dist"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/raulsaavedra/cli-core.git"
-  },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit",
+    "lint": "bunx @biomejs/biome check .",
+    "format": "bunx @biomejs/biome check --write .",
+    "check": "bun run lint && bun run typecheck && bun test"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "^20.0.0",
-    "typescript": "^5.0.0"
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^22.13.10",
+    "bun-types": "latest",
+    "typescript": "^5.8.2"
   }
 }

@@ -1,75 +1,44 @@
 # cli-core
 
-Shared utilities for Raul’s CLI tools (Bun + TypeScript).
+Shared utilities for Raul’s CLI tools (Bun/TypeScript).
 
-## Install (local workspace)
+## Local Development
 ```bash
-bun add file:../packages/cli-core
+bun install
+bun run check
 ```
 
 ## Modules
 
-### `args`
-- `requireAtLeastOne(values, message)`
-- `requireExactlyOne(values, message)`
-- `requireAll(values, message)`
-- `parseIntOption(value, label)`
+### `pkg/args`
+- `ParseIntOption(value, label)`
+- `RequireExactlyOne(values, message)`
 
-### `commander`
-- `collect(value, previous)`
-- `withJsonOption(command, description?)`
+### `pkg/format`
+- `Date(value)`
+- `DateTime(value)`
+- `Truncate(text, max)`
 
-### `format`
-- `formatDate(dateStr)`
-- `formatDateTime(dateStr)`
-- `truncate(text, max)`
+### `pkg/jsoninput`
+- `Read(ReadOptions): string`
+  - Returns validated raw JSON text.
+  - Returns `"null"` when `AllowEmpty` is `true` and input is empty.
 
-### `json-input`
-- `readJsonInput({ data, file, label?, schema?, allowEmpty? })`
+### `pkg/output`
+- `JSON(v)`
+- `Success(format, ...)`
+- `Errorf(format, ...)`
+- `Fatalf(format, ...): never` (throws `Error`)
 
-### `output`
-- `output(data, { json?, emptyMessage?, formatItem? })`
-- `error(message)` (prints + exits)
-- `success(message)`
+### `pkg/skills`
+- `ResolveSkillsDir(dest)`
+- `Install(InstallOptions)`
 
-### `sqlite`
-- `dbPath(appName, filename)`
-- `ensureDirForFile(path)`
-- `applyPragmas(db, pragmas)`
-- `openSqliteDb({ appName, filename, path?, migrate?, pragmas? })`
+### `pkg/sqliteutil`
+- `DBPath(appName, filename)`
+- `EnsureDirForFile(path)`
+- `ApplyPragmas(db, pragmas)`
+- `OpenSQLite(OpenOptions): [Database, string]`
 
-### `stdio`
-- `readStdin()`
-
-### `skills/install`
-- `resolveSkillsDir(dest?)`
-- `resolveSkillSource({ skillName, cwd?, argv0? })`
-- `installSkill({ srcDir, destDir, name?, mode?, overwrite? })`
-
-## Examples
-
-```ts
-import { openSqliteDb, output, readJsonInput } from "@raulsaavedra/cli-core";
-
-const db = openSqliteDb({
-  appName: "tickets",
-  filename: "tickets.db",
-  pragmas: ["foreign_keys = ON"],
-  migrate,
-});
-
-const payload = await readJsonInput({ data: opts.data, file: opts.file, label: "Instructions" });
-output(payload, { json: true });
-```
-
-```ts
-import { installSkill, resolveSkillsDir } from "@raulsaavedra/cli-core";
-
-const destDir = resolveSkillsDir(process.env.SKILL_DEST);
-await installSkill({
-  srcDir: new URL("../skills/tickets", import.meta.url).pathname,
-  destDir,
-  name: "tickets",
-  overwrite: true,
-});
-```
+### `pkg/stdio`
+- `ReadStdin()`
