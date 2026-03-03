@@ -23,7 +23,7 @@ func ResolveSkillsDir(dest string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
-	return filepath.Join(home, ".claude", "skills"), nil
+	return filepath.Join(home, ".agents", "skills"), nil
 }
 
 func Install(opts InstallOptions) (string, error) {
