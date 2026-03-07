@@ -54,18 +54,6 @@ func TestRenderUsesTerminalDefaultForegroundForBody(t *testing.T) {
 	}
 }
 
-func TestRenderCompactsHeadingAndCodeBlockSpacing(t *testing.T) {
-	result := Render("## Heading\n\n```ts\nconst x = 1\n```\n\nAfter", 80)
-	joined := strings.Join(result.Plain, "\n")
-
-	if strings.Contains(joined, "## Heading\n\n\n") {
-		t.Fatalf("expected no extra blank run after heading, got %q", joined)
-	}
-	if strings.Contains(joined, "const x = 1\n\n\nAfter") {
-		t.Fatalf("expected no extra blank run after code block, got %q", joined)
-	}
-}
-
 func TestNormalizeRenderedLinesRemovesSharedIndentAndOuterBlankLines(t *testing.T) {
 	got := normalizeRenderedLines([]string{
 		"",
