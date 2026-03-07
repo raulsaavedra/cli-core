@@ -97,11 +97,18 @@ func Render(content string, width int) Result {
 func sharedStyleConfig() glamouransi.StyleConfig {
 	cfg := styles.DarkStyleConfig
 	cfg.Document.StylePrimitive.Color = nil
+	cfg.Document.Margin = uintPtr(0)
 	cfg.Paragraph.StylePrimitive.Color = nil
 	cfg.Text.Color = nil
 	cfg.LinkText.Color = nil
+	cfg.Heading.StylePrimitive.BlockSuffix = ""
 	cfg.Code.StylePrimitive.Color = nil
+	cfg.CodeBlock.StyleBlock.Margin = uintPtr(0)
 	return cfg
+}
+
+func uintPtr(v uint) *uint {
+	return &v
 }
 
 func normalizeRenderedLines(lines []string) []string {
