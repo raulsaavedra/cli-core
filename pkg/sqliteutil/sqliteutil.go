@@ -66,8 +66,6 @@ func OpenSQLite(opts OpenOptions) (*sql.DB, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("open sqlite %s: %w", dbPath, err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 
 	if opts.Migrate != nil {
 		if err := opts.Migrate(db); err != nil {

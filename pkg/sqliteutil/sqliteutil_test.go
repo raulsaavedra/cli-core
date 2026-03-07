@@ -25,7 +25,7 @@ func TestOpenSQLiteAppliesDefaultPragmas(t *testing.T) {
 	assertPragmaInt(t, db, "foreign_keys", 1)
 	assertPragmaInt(t, db, "busy_timeout", 10000)
 	assertPragmaText(t, db, "journal_mode", "wal")
-	assertDBPoolSize(t, db, 1)
+	assertDBPoolUnlimited(t, db)
 }
 
 func TestOpenSQLiteAllowsPragmaOverrides(t *testing.T) {
@@ -75,11 +75,11 @@ func assertPragmaText(t *testing.T, db *sql.DB, pragma, want string) {
 	}
 }
 
-func assertDBPoolSize(t *testing.T, db *sql.DB, want int) {
+func assertDBPoolUnlimited(t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	stats := db.Stats()
-	if stats.MaxOpenConnections != want {
-		t.Fatalf("MaxOpenConnections = %d, want %d", stats.MaxOpenConnections, want)
+	if stats.MaxOpenConnections != 0 {
+		t.Fatalf("MaxOpenConnections = %d, want 0 (unlimited)", stats.MaxOpenConnections)
 	}
 }
