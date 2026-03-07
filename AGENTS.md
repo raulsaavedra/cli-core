@@ -1,30 +1,39 @@
 # cli-core
 
 Purpose:
-- Shared, reusable building blocks for Raul’s local CLIs (Go).
-- Consolidate common CLI patterns (SQLite bootstrap, output, JSON input).
+- Shared Go packages for local and agent-friendly CLIs.
+- Keep common infrastructure in one place so downstream tools stay small.
 
 Scope:
-- Generic helpers only (no domain rules, no CLI commands, no database schemas).
-- Modules must stay app-agnostic and work across multiple CLIs.
+- App-agnostic helpers only.
+- Packages should be reusable across multiple CLIs without carrying domain rules.
+
+Current packages:
+- `pkg/output`: terminal and JSON output helpers
+- `pkg/skills`: install skill directories into an agent skills root
+- `pkg/sqliteutil`: file-backed SQLite opening and bootstrap helpers
+- `pkg/stdio`: stdin helpers
+- `pkg/termmd`: terminal Markdown rendering and metadata extraction
 
 Non-goals:
-- No business logic, no project-specific formatting, no network calls.
-- No direct CLI wiring or Cobra command definitions.
+- No app-specific command definitions or business logic
+- No schemas or migrations tied to one CLI
+- No remote service clients unless they are broadly reusable and clearly in scope
 
 API policy:
-- Keep packages in `pkg/*`.
-- New exports must be documented in README.
-- Prefer small, composable functions over large helpers.
+- Keep exports in `pkg/*`
+- Document new public APIs in `README.md`
+- Prefer small, composable helpers over large frameworks
+- Preserve stable behavior for downstream CLIs when possible
 
 Error policy:
-- Helpers should return `error` and let callers decide how to render/exit.
-- Avoid calling `os.Exit` in shared packages.
+- Shared packages should return `error`
+- Avoid calling `os.Exit` in library code
 
-Dependencies:
-- Keep dependencies minimal.
-- Prefer Go stdlib where possible.
+Testing policy:
+- Add focused unit tests for exported behavior
+- Run `go test ./...` before committing
 
-Compatibility:
-- Works on Linux/macOS with Go 1.24+.
-- Keep APIs stable for downstream CLIs.
+Dependency policy:
+- Keep dependencies minimal
+- Prefer the standard library unless a dependency clearly earns its keep
