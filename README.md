@@ -5,7 +5,7 @@ Shared Go packages for building local and agent-friendly CLIs.
 `cli-core` is intentionally small. It provides a few reusable building blocks that showed up across multiple command-line tools:
 
 - `pkg/output` for JSON and human-readable terminal output
-- `pkg/skills` for installing agent skill directories into `~/.agents/skills` or another destination
+- `pkg/skills` for installing agent skill directories into `~/.claude/skills` or another destination
 - `pkg/sqliteutil` for opening local SQLite databases with sensible defaults for CLI workloads
 - `pkg/stdio` for reading piped stdin content
 - `pkg/termmd` for rendering Markdown in the terminal while preserving plain-text metadata
@@ -35,7 +35,7 @@ Helpers for installing a skill directory into an agent skills folder.
 - `ResolveSkillsDir(dest string) (string, error)`
 - `Install(InstallOptions) (string, error)`
 
-If `dest` is empty, `ResolveSkillsDir` defaults to `~/.agents/skills`.
+If `dest` is empty, `ResolveSkillsDir` defaults to `~/.claude/skills`.
 
 ### `pkg/sqliteutil`
 
