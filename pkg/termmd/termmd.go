@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	glamouransi "github.com/charmbracelet/glamour/ansi"
 	styles "github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -54,6 +55,11 @@ func Render(content string, width int) Result {
 	}
 
 	lines := normalizeRenderedLines(strings.Split(strings.TrimRight(rendered, "\n"), "\n"))
+	for i, line := range lines {
+		if ansi.StringWidth(line) > width {
+			lines[i] = ansi.Truncate(line, width, "")
+		}
+	}
 	plain := make([]string, 0, len(lines))
 	for _, line := range lines {
 		plain = append(plain, strings.TrimRight(stripANSI(line), " "))
@@ -96,6 +102,8 @@ func Render(content string, width int) Result {
 
 func sharedStyleConfig() glamouransi.StyleConfig {
 	cfg := styles.DarkStyleConfig
+	noMargin := uint(0)
+	cfg.Document.Margin = &noMargin
 	cfg.Document.StylePrimitive.Color = nil
 	cfg.Paragraph.StylePrimitive.Color = nil
 	cfg.Text.Color = nil
