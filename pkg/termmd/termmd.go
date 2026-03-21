@@ -109,6 +109,39 @@ func sharedStyleConfig() glamouransi.StyleConfig {
 	cfg.Text.Color = nil
 	cfg.LinkText.Color = nil
 	cfg.Code.StylePrimitive.Color = nil
+
+	bold := true
+	underline := true
+
+	// H1: bold + underline + magenta — page title, should dominate.
+	h1Color := "205"
+	cfg.H1.StylePrimitive.Bold = &bold
+	cfg.H1.StylePrimitive.Underline = &underline
+	cfg.H1.StylePrimitive.Color = &h1Color
+	cfg.H1.StylePrimitive.Prefix = "█ "
+
+	// H2: bold + cyan — major sections.
+	h2Color := "81"
+	cfg.H2.StylePrimitive.Bold = &bold
+	cfg.H2.StylePrimitive.Color = &h2Color
+	cfg.H2.StylePrimitive.Prefix = "▌ "
+
+	// H3: bold + green — subsections.
+	h3Color := "114"
+	cfg.H3.StylePrimitive.Bold = &bold
+	cfg.H3.StylePrimitive.Color = &h3Color
+	cfg.H3.StylePrimitive.Prefix = "▎ "
+
+	// H4: bold + yellow — minor headings.
+	h4Color := "186"
+	cfg.H4.StylePrimitive.Bold = &bold
+	cfg.H4.StylePrimitive.Color = &h4Color
+
+	// H5/H6: dim, no bold — rarely used, shouldn't compete.
+	h5Color := "244"
+	cfg.H5.StylePrimitive.Color = &h5Color
+	cfg.H6.StylePrimitive.Color = &h5Color
+
 	return cfg
 }
 
