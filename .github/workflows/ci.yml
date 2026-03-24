@@ -7,17 +7,18 @@ on:
   pull_request:
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out code
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Run tests
-        run: go test ./...
+      - name: Build
+        run: cargo build
+
+      - name: Test
+        run: cargo test
