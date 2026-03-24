@@ -1,4 +1,8 @@
 node_modules/
 *.log
 .DS_Store
+dist/
+bun.lock
 
+/target/
+Cargo.lock
