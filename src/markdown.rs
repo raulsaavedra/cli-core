@@ -693,7 +693,7 @@ enum Block {
     Paragraph { text: String },
     List { ordered: bool, items: Vec<String> },
     Blockquote { lines: Vec<String> },
-    Code { code: String },
+    Code { lang: String, code: String },
     Hr,
     Blank,
 }
@@ -717,6 +717,7 @@ fn parse_blocks(content: &str) -> Vec<Block> {
         if let Some(fence_info) = try_parse_fence(line) {
             let code_lines = collect_fenced_code(&lines, &mut i, &fence_info.0);
             blocks.push(Block::Code {
+                lang: fence_info.1.to_lowercase(),
                 code: code_lines.join("\n"),
             });
             continue;
@@ -1022,6 +1023,7 @@ fn collect_paragraph(lines: &[&str], i: &mut usize) -> Vec<String> {
 
 struct RenderContext {
     width: usize,
+    viewport_width: usize,
     links: Vec<Link>,
     seen_links: HashSet<String>,
     headings: Vec<Heading>,
@@ -1106,9 +1108,16 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 }
             }
 
-            Block::Code { code } => {
+            Block::Code { lang, code } => {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
+                }
+                if lang == "mermaid" {
+                    if let Some(lines) = crate::mermaid::render_flowchart(code, ctx.viewport_width) {
+                        out.extend(lines);
+                        out.push(String::new());
+                        continue;
+                    }
                 }
                 for code_line in code.split('\n') {
                     out.push(format!("  {}", ansi_dim(code_line)));
@@ -1458,7 +1467,15 @@ fn remap_heading_lines(headings: &mut [Heading], plain: &[String]) {
 ///
 /// `width` is clamped to a minimum of 20 columns.
 pub fn render(content: &str, width: usize) -> RenderResult {
+    render_with_viewport(content, width, width)
+}
+
+/// Render markdown with a separate viewport width for diagram blocks.
+/// `width` controls text wrapping; `viewport_width` is the full terminal width
+/// used for mermaid diagrams that benefit from extra horizontal space.
+pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) -> RenderResult {
     let width = width.max(20);
+    let viewport_width = viewport_width.max(width);
 
     // Extract metadata from raw source.
     let (meta_headings, meta_links) = extract_metadata(content);
@@ -1467,6 +1484,7 @@ pub fn render(content: &str, width: usize) -> RenderResult {
     // Parse and render blocks.
     let mut ctx = RenderContext {
         width,
+        viewport_width,
         links: Vec::new(),
         seen_links: HashSet::new(),
         headings: Vec::new(),
@@ -1478,10 +1496,11 @@ pub fn render(content: &str, width: usize) -> RenderResult {
     // Normalize output lines.
     let mut lines = normalize_rendered_lines(&raw_lines);
 
-    // Truncate lines exceeding width.
+    // Truncate lines exceeding viewport width.
+    // Use viewport_width (not prose width) so diagrams aren't clipped.
     for line in &mut lines {
-        if visible_width(line) > width {
-            *line = truncate_to_width(line, width);
+        if visible_width(line) > viewport_width {
+            *line = truncate_to_width(line, viewport_width);
         }
     }
 
