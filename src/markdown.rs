@@ -694,6 +694,7 @@ enum Block {
     List { ordered: bool, items: Vec<String> },
     Blockquote { lines: Vec<String> },
     Code { lang: String, code: String },
+    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
     Hr,
     Blank,
 }
@@ -764,6 +765,12 @@ fn parse_blocks(content: &str) -> Vec<Block> {
             continue;
         }
 
+        // Table — detect pipe-delimited rows with a separator line.
+        if let Some(table) = try_parse_table(&lines, &mut i) {
+            blocks.push(table);
+            continue;
+        }
+
         // Paragraph — collect contiguous non-blank, non-special lines.
         let para_lines = collect_paragraph(&lines, &mut i);
         if !para_lines.is_empty() {
@@ -818,6 +825,67 @@ fn collect_fenced_code(lines: &[&str], i: &mut usize, fence: &str) -> Vec<String
         *i += 1;
     }
     code_lines
+}
+
+/// Try to parse a GFM table starting at the current line.
+/// A table requires: header row with `|`, separator row with `|---|`, and at least one data row.
+fn try_parse_table(lines: &[&str], i: &mut usize) -> Option<Block> {
+    let start = *i;
+    // Need at least 3 lines: header, separator, one data row
+    if start + 2 >= lines.len() {
+        return None;
+    }
+
+    let header_line = lines[start].trim();
+    let sep_line = lines[start + 1].trim();
+
+    // Header must contain pipes
+    if !header_line.contains('|') {
+        return None;
+    }
+    // Separator must be pipes and dashes (with optional colons for alignment)
+    if !is_table_separator(sep_line) {
+        return None;
+    }
+
+    let headers = parse_table_row(header_line);
+    if headers.is_empty() {
+        return None;
+    }
+
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut j = start + 2;
+    while j < lines.len() {
+        let row_line = lines[j].trim();
+        if row_line.is_empty() || !row_line.contains('|') {
+            break;
+        }
+        let cells = parse_table_row(row_line);
+        rows.push(cells);
+        j += 1;
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    *i = j;
+    Some(Block::Table { headers, rows })
+}
+
+fn is_table_separator(line: &str) -> bool {
+    if !line.contains('|') || !line.contains('-') {
+        return false;
+    }
+    line.chars().all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
+}
+
+fn parse_table_row(line: &str) -> Vec<String> {
+    let trimmed = line.trim().trim_matches('|');
+    trimmed
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
 }
 
 fn try_parse_heading(line: &str) -> Option<(usize, String)> {
@@ -1125,6 +1193,15 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 out.push(String::new());
             }
 
+            Block::Table { headers, rows } => {
+                if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
+                    out.push(String::new());
+                }
+                let table_lines = render_table(headers, rows, ctx);
+                out.extend(table_lines);
+                out.push(String::new());
+            }
+
             Block::Hr => {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
@@ -1135,6 +1212,117 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
             }
         }
     }
+
+    out
+}
+
+fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContext) -> Vec<String> {
+    let num_cols = headers.len();
+
+    // Pre-render all cells through render_inline so we can measure VISIBLE width
+    let rendered_headers: Vec<String> = headers
+        .iter()
+        .map(|h| render_inline(h, &mut ctx.links, &mut ctx.seen_links))
+        .collect();
+    let rendered_rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            (0..num_cols)
+                .map(|c| {
+                    let text = row.get(c).map(|s| s.as_str()).unwrap_or("");
+                    render_inline(text, &mut ctx.links, &mut ctx.seen_links)
+                })
+                .collect()
+        })
+        .collect();
+
+    // Compute column widths from VISIBLE width of rendered content
+    let mut col_widths: Vec<usize> = rendered_headers.iter().map(|h| visible_width(h)).collect();
+    for row in &rendered_rows {
+        for (c, cell) in row.iter().enumerate() {
+            if c < col_widths.len() {
+                col_widths[c] = col_widths[c].max(visible_width(cell));
+            }
+        }
+    }
+
+    // Cap total width to viewport, shrinking proportionally if needed
+    let border_overhead = num_cols + 1;
+    let padding_overhead = num_cols * 2;
+    let total = col_widths.iter().sum::<usize>() + border_overhead + padding_overhead;
+    if total > ctx.viewport_width && ctx.viewport_width > border_overhead + padding_overhead {
+        let avail = ctx.viewport_width - border_overhead - padding_overhead;
+        let content_total: usize = col_widths.iter().sum();
+        if content_total > 0 {
+            for w in &mut col_widths {
+                *w = (*w * avail / content_total).max(3);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+
+    // Top border: ┌───┬───┐
+    out.push(format!(
+        "{}{}{}",
+        ansi_dim("┌"),
+        col_widths.iter().map(|w| ansi_dim(&"─".repeat(w + 2))).collect::<Vec<_>>().join(&ansi_dim("┬")),
+        ansi_dim("┐")
+    ));
+
+    // Header row: │ H1 │ H2 │
+    let header_cells: Vec<String> = rendered_headers
+        .iter()
+        .enumerate()
+        .map(|(c, styled)| {
+            let vis_w = visible_width(styled);
+            let col_w = col_widths.get(c).copied().unwrap_or(0);
+            let pad = col_w.saturating_sub(vis_w);
+            format!(" {}{} ", styled, " ".repeat(pad))
+        })
+        .collect();
+    out.push(format!(
+        "{}{}{}",
+        ansi_dim("│"),
+        header_cells.join(&ansi_dim("│")),
+        ansi_dim("│")
+    ));
+
+    // Separator: ├───┼───┤
+    out.push(format!(
+        "{}{}{}",
+        ansi_dim("├"),
+        col_widths.iter().map(|w| ansi_dim(&"─".repeat(w + 2))).collect::<Vec<_>>().join(&ansi_dim("┼")),
+        ansi_dim("┤")
+    ));
+
+    // Data rows
+    for row in &rendered_rows {
+        let cells: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(c, styled)| {
+                let vis_w = visible_width(styled);
+                let col_w = col_widths.get(c).copied().unwrap_or(0);
+                let pad = col_w.saturating_sub(vis_w);
+                format!(" {}{} ", styled, " ".repeat(pad))
+            })
+            .collect();
+        out.push(format!(
+            "{}{}{}",
+            ansi_dim("│"),
+            cells.join(&ansi_dim("│")),
+            ansi_dim("│")
+        ));
+    }
+
+    // Bottom border: └───┴───┘
+    out.push(format!(
+        "{}{}{}",
+        ansi_dim("└"),
+        col_widths.iter().map(|w| ansi_dim(&"─".repeat(w + 2))).collect::<Vec<_>>().join(&ansi_dim("┴")),
+        ansi_dim("┘")
+    ));
 
     out
 }
