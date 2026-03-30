@@ -48,7 +48,7 @@ fn strip_ansi(s: &str) -> String {
             if let Some(&(_, next_ch)) = chars.peek() {
                 if next_ch == '[' {
                     chars.next(); // skip '['
-                    // Skip until 'm'
+                                  // Skip until 'm'
                     while let Some((_, c)) = chars.next() {
                         if c == 'm' {
                             break;
@@ -179,9 +179,7 @@ fn render_inline(text: &str, links: &mut Vec<Link>, seen_links: &mut HashSet<Str
     text = regex_replace_all(&text, r"\*{2}(.+?)\*{2}", |caps: &[&str]| {
         ansi_bold(caps[1])
     });
-    text = regex_replace_all(&text, r"_{2}(.+?)_{2}", |caps: &[&str]| {
-        ansi_bold(caps[1])
-    });
+    text = regex_replace_all(&text, r"_{2}(.+?)_{2}", |caps: &[&str]| ansi_bold(caps[1]));
 
     // 5. Italic: *text* or _text_ (avoid matching inside words for _)
     text = regex_replace_all(&text, r"(?<!\w)\*(.+?)\*(?!\*)", |caps: &[&str]| {
@@ -425,7 +423,11 @@ fn regex_replace_all_with_links(
             if after_close.starts_with('(') {
                 if let Some(paren_end) = after_close.find(')') {
                     let href = after_close[1..paren_end].trim();
-                    let trim_label = if label.trim().is_empty() { href } else { label.trim() };
+                    let trim_label = if label.trim().is_empty() {
+                        href
+                    } else {
+                        label.trim()
+                    };
 
                     let key = format!("{trim_label}|{href}");
                     if !href.is_empty() && !seen_links.contains(&key) {
@@ -617,7 +619,11 @@ fn wrap_line(text: &str, width: usize, hanging_indent: &str) -> Vec<String> {
                 current_vis = hang_width + w_vis;
             }
         } else {
-            let limit = if is_first_line { width } else { width + hang_width };
+            let limit = if is_first_line {
+                width
+            } else {
+                width + hang_width
+            };
             if current_vis + 1 + w_vis > limit {
                 result.push(current_line);
                 is_first_line = false;
@@ -689,12 +695,28 @@ fn split_words(text: &str) -> Vec<String> {
 
 #[derive(Debug)]
 enum Block {
-    Heading { level: usize, text: String },
-    Paragraph { text: String },
-    List { ordered: bool, items: Vec<String> },
-    Blockquote { lines: Vec<String> },
-    Code { lang: String, code: String },
-    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Heading {
+        level: usize,
+        text: String,
+    },
+    Paragraph {
+        text: String,
+    },
+    List {
+        ordered: bool,
+        items: Vec<String>,
+    },
+    Blockquote {
+        lines: Vec<String>,
+    },
+    Code {
+        lang: String,
+        code: String,
+    },
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
     Hr,
     Blank,
 }
@@ -877,7 +899,8 @@ fn is_table_separator(line: &str) -> bool {
     if !line.contains('|') || !line.contains('-') {
         return false;
     }
-    line.chars().all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
+    line.chars()
+        .all(|c| c == '|' || c == '-' || c == ':' || c == ' ')
 }
 
 fn parse_table_row(line: &str) -> Vec<String> {
@@ -1145,7 +1168,11 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     let hang_indent = " ".repeat(bullet_plain_width);
                     let styled = render_inline(item, &mut ctx.links, &mut ctx.seen_links);
                     let item_width = ctx.width.saturating_sub(bullet_plain_width);
-                    let effective_width = if item_width > 10 { item_width } else { ctx.width };
+                    let effective_width = if item_width > 10 {
+                        item_width
+                    } else {
+                        ctx.width
+                    };
                     let wrapped = wrap_line(&styled, effective_width, &hang_indent);
                     if !wrapped.is_empty() {
                         out.push(format!("{bullet}{}", wrapped[0]));
@@ -1181,7 +1208,8 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     out.push(String::new());
                 }
                 if lang == "mermaid" {
-                    if let Some(lines) = crate::mermaid::render_flowchart(code, ctx.viewport_width) {
+                    if let Some(lines) = crate::mermaid::render_flowchart(code, ctx.viewport_width)
+                    {
                         out.extend(lines);
                         out.push(String::new());
                         continue;
@@ -1266,7 +1294,11 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     out.push(format!(
         "{}{}{}",
         ansi_dim("┌"),
-        col_widths.iter().map(|w| ansi_dim(&"─".repeat(w + 2))).collect::<Vec<_>>().join(&ansi_dim("┬")),
+        col_widths
+            .iter()
+            .map(|w| ansi_dim(&"─".repeat(w + 2)))
+            .collect::<Vec<_>>()
+            .join(&ansi_dim("┬")),
         ansi_dim("┐")
     ));
 
@@ -1292,7 +1324,11 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     out.push(format!(
         "{}{}{}",
         ansi_dim("├"),
-        col_widths.iter().map(|w| ansi_dim(&"─".repeat(w + 2))).collect::<Vec<_>>().join(&ansi_dim("┼")),
+        col_widths
+            .iter()
+            .map(|w| ansi_dim(&"─".repeat(w + 2)))
+            .collect::<Vec<_>>()
+            .join(&ansi_dim("┼")),
         ansi_dim("┤")
     ));
 
@@ -1320,7 +1356,11 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     out.push(format!(
         "{}{}{}",
         ansi_dim("└"),
-        col_widths.iter().map(|w| ansi_dim(&"─".repeat(w + 2))).collect::<Vec<_>>().join(&ansi_dim("┴")),
+        col_widths
+            .iter()
+            .map(|w| ansi_dim(&"─".repeat(w + 2)))
+            .collect::<Vec<_>>()
+            .join(&ansi_dim("┴")),
         ansi_dim("┘")
     ));
 
@@ -1414,7 +1454,10 @@ fn normalize_rendered_lines(lines: &[String]) -> Vec<String> {
 
     let indent = common_leading_indent(&lines);
     if indent > 0 {
-        lines = lines.iter().map(|l| trim_leading_indent(l, indent)).collect();
+        lines = lines
+            .iter()
+            .map(|l| trim_leading_indent(l, indent))
+            .collect();
     }
 
     let lines = collapse_blank_runs(&lines, 1);
@@ -1545,7 +1588,11 @@ fn make_lines_self_contained(lines: &[String]) -> Vec<String> {
     for line in lines {
         // Prepend any styles that were active at the end of the previous line.
         let prefix: String = if !active.is_empty() {
-            active.iter().map(|(_, code)| code.as_str()).collect::<Vec<_>>().join("")
+            active
+                .iter()
+                .map(|(_, code)| code.as_str())
+                .collect::<Vec<_>>()
+                .join("")
         } else {
             String::new()
         };
@@ -1590,10 +1637,7 @@ fn apply_ansi_code(active: &mut Vec<(String, String)>, params: &str) {
         return;
     }
 
-    let parts: Vec<u32> = params
-        .split(';')
-        .filter_map(|p| p.parse().ok())
-        .collect();
+    let parts: Vec<u32> = params.split(';').filter_map(|p| p.parse().ok()).collect();
 
     if parts.is_empty() {
         return;
@@ -1696,7 +1740,10 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
     lines = make_lines_self_contained(&lines);
 
     // Build plain-text mirror.
-    let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l).trim_end().to_string()).collect();
+    let plain: Vec<String> = lines
+        .iter()
+        .map(|l| strip_ansi(l).trim_end().to_string())
+        .collect();
 
     // Remap heading line indices.
     remap_heading_lines(&mut ctx.headings, &plain);

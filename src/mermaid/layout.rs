@@ -47,7 +47,12 @@ pub struct Padding {
 
 impl Padding {
     fn zero() -> Self {
-        Self { top: 0, right: 0, bottom: 0, left: 0 }
+        Self {
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+        }
     }
 }
 
@@ -135,7 +140,11 @@ fn build_node_sg_map(graph: &FlowGraph) -> HashMap<usize, usize> {
 
 fn make_node_box(node: &super::graph::Node) -> LayoutBox {
     let (border, style, display) = match node.shape {
-        NodeShape::Rounded => (BorderStyle::Rounded, ContentStyle::NodeLabel, node.label.clone()),
+        NodeShape::Rounded => (
+            BorderStyle::Rounded,
+            ContentStyle::NodeLabel,
+            node.label.clone(),
+        ),
         NodeShape::Diamond => (
             BorderStyle::Solid,
             ContentStyle::DiamondLabel,
@@ -146,7 +155,11 @@ fn make_node_box(node: &super::graph::Node) -> LayoutBox {
             ContentStyle::CircleLabel,
             format!("(( {} ))", node.label),
         ),
-        _ => (BorderStyle::Solid, ContentStyle::NodeLabel, node.label.clone()),
+        _ => (
+            BorderStyle::Solid,
+            ContentStyle::NodeLabel,
+            node.label.clone(),
+        ),
     };
 
     let text_w = display.chars().count();
@@ -155,7 +168,10 @@ fn make_node_box(node: &super::graph::Node) -> LayoutBox {
     LayoutBox {
         border: Some(border),
         label: None,
-        content: Some(BoxContent { text: display, style }),
+        content: Some(BoxContent {
+            text: display,
+            style,
+        }),
         padding: Padding::zero(),
         children: Vec::new(),
         width: box_w,
@@ -232,7 +248,11 @@ fn layout_items(
                             }
                         }
                     }
-                    let bc = if count > 0 { sum / count as f64 } else { node_idx as f64 };
+                    let bc = if count > 0 {
+                        sum / count as f64
+                    } else {
+                        node_idx as f64
+                    };
                     (node_idx, bc)
                 })
                 .collect();
@@ -248,7 +268,9 @@ fn layout_items(
     if is_horizontal {
         let mut x = 0;
         for layer in &layer_nodes {
-            if layer.is_empty() { continue; }
+            if layer.is_empty() {
+                continue;
+            }
             let max_w = layer.iter().map(|&i| items[i].width).max().unwrap_or(0);
             let mut y = 0;
             for &idx in layer {
@@ -261,8 +283,14 @@ fn layout_items(
     } else {
         let mut y = 0;
         for layer in &layer_nodes {
-            if layer.is_empty() { continue; }
-            let max_h = layer.iter().map(|&i| items[i].height).max().unwrap_or(NODE_HEIGHT);
+            if layer.is_empty() {
+                continue;
+            }
+            let max_h = layer
+                .iter()
+                .map(|&i| items[i].height)
+                .max()
+                .unwrap_or(NODE_HEIGHT);
             let mut x = 0;
             for &idx in layer {
                 result.push((idx, x, y));
@@ -299,7 +327,10 @@ fn layout_subgraph(
         .iter()
         .map(|&idx| {
             let b = make_node_box(&graph.nodes[idx]);
-            Item { width: b.width, height: b.height }
+            Item {
+                width: b.width,
+                height: b.height,
+            }
         })
         .collect();
 
@@ -337,8 +368,16 @@ fn layout_subgraph(
         })
         .collect();
 
-    let inner_w = children.iter().map(|c| c.x + c.layout_box.width).max().unwrap_or(0);
-    let inner_h = children.iter().map(|c| c.y + c.layout_box.height).max().unwrap_or(0);
+    let inner_w = children
+        .iter()
+        .map(|c| c.x + c.layout_box.width)
+        .max()
+        .unwrap_or(0);
+    let inner_h = children
+        .iter()
+        .map(|c| c.y + c.layout_box.height)
+        .max()
+        .unwrap_or(0);
 
     let label_w = sg.label.chars().count() + 4;
     let border = 2; // top + bottom border
@@ -392,7 +431,10 @@ fn layout_outer(
         }
         let b = make_node_box(node);
         let outer_idx = outer_items.len();
-        outer_items.push(Item { width: b.width, height: b.height });
+        outer_items.push(Item {
+            width: b.width,
+            height: b.height,
+        });
         outer_keys.push(OuterKey::Node(idx));
         node_to_outer.insert(idx, outer_idx);
     }
@@ -400,7 +442,10 @@ fn layout_outer(
     // Compound subgraph nodes
     for (sg_idx, sg_box) in sg_boxes.iter().enumerate() {
         let outer_idx = outer_items.len();
-        outer_items.push(Item { width: sg_box.width, height: sg_box.height });
+        outer_items.push(Item {
+            width: sg_box.width,
+            height: sg_box.height,
+        });
         outer_keys.push(OuterKey::Subgraph(sg_idx));
         sg_to_outer.insert(sg_idx, outer_idx);
     }

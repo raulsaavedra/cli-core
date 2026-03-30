@@ -193,7 +193,9 @@ fn parse_node_ref(line: &str, pos: usize) -> Option<(String, String, NodeShape, 
     // Parse node ID: alphanumeric + underscore + hyphen
     let id_start = pos;
     let mut i = pos;
-    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-') {
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'-')
+    {
         i += 1;
     }
     if i == id_start {
@@ -295,7 +297,9 @@ fn parse_edge_op(line: &str, pos: usize) -> Option<(EdgeStyle, Option<String>, u
         if after_arrow < bytes.len() && bytes[after_arrow] == b'|' {
             // Find closing pipe
             if let Some(pipe_end) = line[after_arrow + 1..].find('|') {
-                let label = line[after_arrow + 1..after_arrow + 1 + pipe_end].trim().to_string();
+                let label = line[after_arrow + 1..after_arrow + 1 + pipe_end]
+                    .trim()
+                    .to_string();
                 let new_pos = after_arrow + 1 + pipe_end + 1;
                 return Some((EdgeStyle::Arrow, Some(label), new_pos));
             }
@@ -310,7 +314,9 @@ fn parse_edge_op(line: &str, pos: usize) -> Option<(EdgeStyle, Option<String>, u
         let after_line = pos + 3;
         if after_line < bytes.len() && bytes[after_line] == b'|' {
             if let Some(pipe_end) = line[after_line + 1..].find('|') {
-                let label = line[after_line + 1..after_line + 1 + pipe_end].trim().to_string();
+                let label = line[after_line + 1..after_line + 1 + pipe_end]
+                    .trim()
+                    .to_string();
                 let new_pos = after_line + 1 + pipe_end + 1;
                 return Some((EdgeStyle::Line, Some(label), new_pos));
             }
@@ -430,7 +436,8 @@ mod tests {
 
     #[test]
     fn subgraph_parsing() {
-        let content = "flowchart TB\n  A --> B\n  subgraph SG[My Group]\n    B --> C\n  end\n  C --> D";
+        let content =
+            "flowchart TB\n  A --> B\n  subgraph SG[My Group]\n    B --> C\n  end\n  C --> D";
         let g = parse_flowchart(content).unwrap();
         assert_eq!(g.subgraphs.len(), 1);
         assert_eq!(g.subgraphs[0].id, "SG");
@@ -486,7 +493,10 @@ mod tests {
         let content = "flowchart TB\n  A --> SG1\n  subgraph SG1[My Group]\n    B1 --> B2\n  end\n  SG1 --> C";
         let g = parse_flowchart(content).unwrap();
         // Phantom node SG1 should be removed
-        assert!(g.node_index("SG1").is_none(), "phantom node SG1 should be removed");
+        assert!(
+            g.node_index("SG1").is_none(),
+            "phantom node SG1 should be removed"
+        );
         // Edge A --> SG1 should become A --> B1 (first internal node)
         assert_eq!(g.edges[0].from, "A");
         assert_eq!(g.edges[0].to, "B1");

@@ -85,7 +85,8 @@ mod tests {
     #[test]
     fn fallback_too_wide() {
         // 30 chars wide terminal with a wide graph should return None
-        let code = "flowchart LR\n  AAAAAAAAAA[Very Long Label Here] --> BBBBBBBBBB[Another Long Label]";
+        let code =
+            "flowchart LR\n  AAAAAAAAAA[Very Long Label Here] --> BBBBBBBBBB[Another Long Label]";
         let result = render_flowchart(code, 30);
         // May or may not fit — just ensure no panic
         let _ = result;

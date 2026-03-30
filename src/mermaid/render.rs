@@ -90,20 +90,65 @@ fn draw_box(
 
         // Top border
         if abs_y < max_y {
-            set(grid, styles, abs_x, abs_y, tl, border_cell_style, max_x, max_y);
+            set(
+                grid,
+                styles,
+                abs_x,
+                abs_y,
+                tl,
+                border_cell_style,
+                max_x,
+                max_y,
+            );
             for dx in 1..w.saturating_sub(1) {
-                set(grid, styles, abs_x + dx, abs_y, horiz, border_cell_style, max_x, max_y);
+                set(
+                    grid,
+                    styles,
+                    abs_x + dx,
+                    abs_y,
+                    horiz,
+                    border_cell_style,
+                    max_x,
+                    max_y,
+                );
             }
             if w > 1 {
-                set(grid, styles, abs_x + w - 1, abs_y, tr, border_cell_style, max_x, max_y);
+                set(
+                    grid,
+                    styles,
+                    abs_x + w - 1,
+                    abs_y,
+                    tr,
+                    border_cell_style,
+                    max_x,
+                    max_y,
+                );
             }
         }
 
         // Side borders
         for dy in 1..h.saturating_sub(1) {
-            set(grid, styles, abs_x, abs_y + dy, vert, border_cell_style, max_x, max_y);
+            set(
+                grid,
+                styles,
+                abs_x,
+                abs_y + dy,
+                vert,
+                border_cell_style,
+                max_x,
+                max_y,
+            );
             if w > 1 {
-                set(grid, styles, abs_x + w - 1, abs_y + dy, vert, border_cell_style, max_x, max_y);
+                set(
+                    grid,
+                    styles,
+                    abs_x + w - 1,
+                    abs_y + dy,
+                    vert,
+                    border_cell_style,
+                    max_x,
+                    max_y,
+                );
             }
         }
 
@@ -112,10 +157,28 @@ fn draw_box(
             let by = abs_y + h - 1;
             set(grid, styles, abs_x, by, bl, border_cell_style, max_x, max_y);
             for dx in 1..w.saturating_sub(1) {
-                set(grid, styles, abs_x + dx, by, horiz, border_cell_style, max_x, max_y);
+                set(
+                    grid,
+                    styles,
+                    abs_x + dx,
+                    by,
+                    horiz,
+                    border_cell_style,
+                    max_x,
+                    max_y,
+                );
             }
             if w > 1 {
-                set(grid, styles, abs_x + w - 1, by, br, border_cell_style, max_x, max_y);
+                set(
+                    grid,
+                    styles,
+                    abs_x + w - 1,
+                    by,
+                    br,
+                    border_cell_style,
+                    max_x,
+                    max_y,
+                );
             }
         }
 
@@ -178,11 +241,7 @@ fn draw_box(
 // Edge drawing
 // ---------------------------------------------------------------------------
 
-fn draw_edge(
-    grid: &mut [Vec<char>],
-    styles: &mut [Vec<CellStyle>],
-    edge: &LayoutEdge,
-) {
+fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &LayoutEdge) {
     let max_y = grid.len();
     let max_x = if max_y > 0 { grid[0].len() } else { 0 };
 
@@ -203,12 +262,25 @@ fn draw_edge(
         if is_vertical {
             // Straight vertical
             let x = tx;
-            let arrow_y = if is_arrow { ty.saturating_sub(arrow_gap) } else { ty };
+            let arrow_y = if is_arrow {
+                ty.saturating_sub(arrow_gap)
+            } else {
+                ty
+            };
             for y in fy..arrow_y {
                 set_edge(grid, styles, x, y, '│', CellStyle::EdgeLine, max_x, max_y);
             }
             if is_arrow {
-                set_edge(grid, styles, x, arrow_y, '▼', CellStyle::ArrowTip, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    x,
+                    arrow_y,
+                    '▼',
+                    CellStyle::ArrowTip,
+                    max_x,
+                    max_y,
+                );
             }
         } else {
             // L-path: vertical down, corner, horizontal, arrow
@@ -221,23 +293,55 @@ fn draw_edge(
 
             // Corner
             let corner_ch = if tx > fx { '└' } else { '┘' };
-            set_edge(grid, styles, fx, turn_y, corner_ch, CellStyle::EdgeLine, max_x, max_y);
+            set_edge(
+                grid,
+                styles,
+                fx,
+                turn_y,
+                corner_ch,
+                CellStyle::EdgeLine,
+                max_x,
+                max_y,
+            );
 
             // Horizontal dashes
-            let (inner_start, inner_end) = if tx > fx {
-                (fx + 1, tx)
-            } else {
-                (tx + 1, fx)
-            };
+            let (inner_start, inner_end) = if tx > fx { (fx + 1, tx) } else { (tx + 1, fx) };
             for x in inner_start..inner_end {
-                set_edge(grid, styles, x, turn_y, '─', CellStyle::EdgeLine, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    x,
+                    turn_y,
+                    '─',
+                    CellStyle::EdgeLine,
+                    max_x,
+                    max_y,
+                );
             }
 
             // Arrow or endpoint
             if is_arrow {
-                set_edge(grid, styles, tx, turn_y, '▼', CellStyle::ArrowTip, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    tx,
+                    turn_y,
+                    '▼',
+                    CellStyle::ArrowTip,
+                    max_x,
+                    max_y,
+                );
             } else {
-                set_edge(grid, styles, tx, turn_y, '─', CellStyle::EdgeLine, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    tx,
+                    turn_y,
+                    '─',
+                    CellStyle::EdgeLine,
+                    max_x,
+                    max_y,
+                );
             }
         }
 
@@ -246,7 +350,11 @@ fn draw_edge(
             let label_y = ty.saturating_sub(1);
             // Center label on the target's x position
             let label_len = label.chars().count();
-            let label_x = if label_len < 2 { tx } else { tx.saturating_sub(label_len / 2) };
+            let label_x = if label_len < 2 {
+                tx
+            } else {
+                tx.saturating_sub(label_len / 2)
+            };
             draw_label_at(grid, styles, label_x, label_y, label, max_x, max_y);
         }
     } else if tx > fx {
@@ -267,7 +375,16 @@ fn draw_edge(
                 }
             }
             if is_arrow {
-                set_edge(grid, styles, arrow_x, y, '▶', CellStyle::ArrowTip, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    arrow_x,
+                    y,
+                    '▶',
+                    CellStyle::ArrowTip,
+                    max_x,
+                    max_y,
+                );
             }
         } else {
             // L-path for LR: horizontal, corner, vertical, arrow
@@ -284,19 +401,64 @@ fn draw_edge(
             }
 
             if ty > fy {
-                set_edge(grid, styles, turn_x, fy, '┐', CellStyle::EdgeLine, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    turn_x,
+                    fy,
+                    '┐',
+                    CellStyle::EdgeLine,
+                    max_x,
+                    max_y,
+                );
                 for y in (fy + 1)..ty {
-                    set_edge(grid, styles, turn_x, y, '│', CellStyle::EdgeLine, max_x, max_y);
+                    set_edge(
+                        grid,
+                        styles,
+                        turn_x,
+                        y,
+                        '│',
+                        CellStyle::EdgeLine,
+                        max_x,
+                        max_y,
+                    );
                 }
             } else {
-                set_edge(grid, styles, turn_x, fy, '┘', CellStyle::EdgeLine, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    turn_x,
+                    fy,
+                    '┘',
+                    CellStyle::EdgeLine,
+                    max_x,
+                    max_y,
+                );
                 for y in (ty + 1)..fy {
-                    set_edge(grid, styles, turn_x, y, '│', CellStyle::EdgeLine, max_x, max_y);
+                    set_edge(
+                        grid,
+                        styles,
+                        turn_x,
+                        y,
+                        '│',
+                        CellStyle::EdgeLine,
+                        max_x,
+                        max_y,
+                    );
                 }
             }
 
             if is_arrow {
-                set_edge(grid, styles, turn_x, ty, '▶', CellStyle::ArrowTip, max_x, max_y);
+                set_edge(
+                    grid,
+                    styles,
+                    turn_x,
+                    ty,
+                    '▶',
+                    CellStyle::ArrowTip,
+                    max_x,
+                    max_y,
+                );
             }
         }
     }
@@ -363,7 +525,16 @@ fn draw_label_on_horiz(
             set_edge(grid, styles, x, y, '─', CellStyle::EdgeLine, max_x, max_y);
         }
         for (i, &ch) in chars.iter().enumerate() {
-            set_edge(grid, styles, start_x + pad + i, y, ch, CellStyle::EdgeLabel, max_x, max_y);
+            set_edge(
+                grid,
+                styles,
+                start_x + pad + i,
+                y,
+                ch,
+                CellStyle::EdgeLabel,
+                max_x,
+                max_y,
+            );
         }
         for x in (start_x + pad + label_len)..end_x {
             set_edge(grid, styles, x, y, '─', CellStyle::EdgeLine, max_x, max_y);
@@ -372,10 +543,28 @@ fn draw_label_on_horiz(
         // Truncate
         let avail = total.saturating_sub(1);
         for i in 0..avail.saturating_sub(1).min(chars.len()) {
-            set_edge(grid, styles, start_x + i, y, chars[i], CellStyle::EdgeLabel, max_x, max_y);
+            set_edge(
+                grid,
+                styles,
+                start_x + i,
+                y,
+                chars[i],
+                CellStyle::EdgeLabel,
+                max_x,
+                max_y,
+            );
         }
         if avail > 1 {
-            set_edge(grid, styles, start_x + avail - 1, y, '…', CellStyle::EdgeLabel, max_x, max_y);
+            set_edge(
+                grid,
+                styles,
+                start_x + avail - 1,
+                y,
+                '…',
+                CellStyle::EdgeLabel,
+                max_x,
+                max_y,
+            );
         }
     } else {
         for x in start_x..end_x {
@@ -444,14 +633,14 @@ fn render_styled_line(chars: &[char], cell_styles: &[CellStyle]) -> String {
                 out.push_str("\x1b[0m");
             }
             match style {
-                CellStyle::NodeBorder => out.push_str("\x1b[2m"),       // dim
-                CellStyle::NodeLabel => out.push_str("\x1b[1m"),        // bold
-                CellStyle::DiamondLabel => out.push_str("\x1b[1;33m"),  // bold yellow
-                CellStyle::CircleLabel => out.push_str("\x1b[1;36m"),   // bold cyan
-                CellStyle::EdgeLine => out.push_str("\x1b[2m"),         // dim
-                CellStyle::EdgeLabel => out.push_str("\x1b[3m"),        // italic
-                CellStyle::ArrowTip => out.push_str("\x1b[36m"),        // cyan
-                CellStyle::SubgraphBorder => out.push_str("\x1b[2m"),   // dim
+                CellStyle::NodeBorder => out.push_str("\x1b[2m"), // dim
+                CellStyle::NodeLabel => out.push_str("\x1b[1m"),  // bold
+                CellStyle::DiamondLabel => out.push_str("\x1b[1;33m"), // bold yellow
+                CellStyle::CircleLabel => out.push_str("\x1b[1;36m"), // bold cyan
+                CellStyle::EdgeLine => out.push_str("\x1b[2m"),   // dim
+                CellStyle::EdgeLabel => out.push_str("\x1b[3m"),  // italic
+                CellStyle::ArrowTip => out.push_str("\x1b[36m"),  // cyan
+                CellStyle::SubgraphBorder => out.push_str("\x1b[2m"), // dim
                 CellStyle::SubgraphLabel => out.push_str("\x1b[36;1m"), // bold cyan
                 CellStyle::Empty => {}
             }
