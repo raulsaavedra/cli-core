@@ -5,7 +5,7 @@ Shared Rust crate for building local and agent-friendly CLIs.
 `cli-core` is intentionally small. It provides reusable building blocks that show up across multiple command-line tools:
 
 - `output` — JSON and human-readable terminal output
-- `skills` — install agent skill directories into `~/.claude/skills` or another destination
+- `skills` — install agent skill directories into the default locations or another destination
 - `sqlite` — open local SQLite databases with sensible defaults for CLI workloads
 - `stdio` — read piped stdin content
 - `markdown` — render Markdown in the terminal and extract plain-text metadata
@@ -36,7 +36,8 @@ Small helpers for writing machine-readable and human-readable output.
 
 Helpers for installing a skill directory into an agent skills folder.
 
-- `resolve_skills_dir(dest: Option<&str>) -> io::Result<PathBuf>` — returns the absolute path of `dest`, or `~/.claude/skills` when `None`
+- `resolve_default_skills_dirs() -> io::Result<Vec<PathBuf>>` — returns the default destinations: `~/.agents/skills` and `~/.claude/skills`
+- `resolve_skills_dir(dest: Option<&str>) -> io::Result<PathBuf>` — returns the absolute path of `dest`, or `~/.agents/skills` when `None`
 - `install(opts: &InstallOptions) -> io::Result<PathBuf>` — copy or symlink a skill directory to the destination; returns the installed path
 
 `InstallOptions` fields: `src_dir`, `dest_dir`, `name` (optional override), `overwrite`, `link`.

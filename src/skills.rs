@@ -17,23 +17,42 @@ pub struct InstallOptions {
 }
 
 /// Resolve the skills destination directory.
-/// Returns the absolute path of `dest`, or `~/.claude/skills` when `None`.
+/// Returns the absolute path of `dest`, or `~/.agents/skills` when `None`.
 pub fn resolve_skills_dir(dest: Option<&str>) -> io::Result<PathBuf> {
     if let Some(d) = dest {
         return Ok(fs::canonicalize(d).unwrap_or_else(|_| PathBuf::from(d)));
     }
-    let home = dirs::home_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
-    Ok(home.join(".claude").join("skills"))
+    Ok(resolve_default_skills_dirs()?
+        .into_iter()
+        .next()
+        .expect("default skills dirs should not be empty"))
+}
+
+/// Resolve the default skills destination directories.
+/// Returns both `~/.agents/skills` and `~/.claude/skills`.
+pub fn resolve_default_skills_dirs() -> io::Result<Vec<PathBuf>> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
+    Ok(vec![
+        home.join(".agents").join("skills"),
+        home.join(".claude").join("skills"),
+    ])
 }
 
 /// Install a skill directory to the destination.
 /// Returns the absolute path of the installed skill.
 pub fn install(opts: &InstallOptions) -> io::Result<PathBuf> {
     if opts.src_dir.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "source directory is required"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source directory is required",
+        ));
     }
     if opts.dest_dir.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "destination directory is required"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination directory is required",
+        ));
     }
 
     let name = opts.name.as_deref().unwrap_or_else(|| {
