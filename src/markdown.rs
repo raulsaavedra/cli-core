@@ -1280,12 +1280,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     let total = col_widths.iter().sum::<usize>() + border_overhead + padding_overhead;
     if total > ctx.viewport_width && ctx.viewport_width > border_overhead + padding_overhead {
         let avail = ctx.viewport_width - border_overhead - padding_overhead;
-        let content_total: usize = col_widths.iter().sum();
-        if content_total > 0 {
-            for w in &mut col_widths {
-                *w = (*w * avail / content_total).max(3);
-            }
-        }
+        shrink_col_widths_to_fit(&mut col_widths, avail, 3);
     }
 
     let mut out = Vec::new();
@@ -1303,22 +1298,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     ));
 
     // Header row: │ H1 │ H2 │
-    let header_cells: Vec<String> = rendered_headers
-        .iter()
-        .enumerate()
-        .map(|(c, styled)| {
-            let vis_w = visible_width(styled);
-            let col_w = col_widths.get(c).copied().unwrap_or(0);
-            let pad = col_w.saturating_sub(vis_w);
-            format!(" {}{} ", styled, " ".repeat(pad))
-        })
-        .collect();
-    out.push(format!(
-        "{}{}{}",
-        ansi_dim("│"),
-        header_cells.join(&ansi_dim("│")),
-        ansi_dim("│")
-    ));
+    out.extend(render_table_row(&rendered_headers, &col_widths));
 
     // Separator: ├───┼───┤
     out.push(format!(
@@ -1334,22 +1314,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
 
     // Data rows
     for row in &rendered_rows {
-        let cells: Vec<String> = row
-            .iter()
-            .enumerate()
-            .map(|(c, styled)| {
-                let vis_w = visible_width(styled);
-                let col_w = col_widths.get(c).copied().unwrap_or(0);
-                let pad = col_w.saturating_sub(vis_w);
-                format!(" {}{} ", styled, " ".repeat(pad))
-            })
-            .collect();
-        out.push(format!(
-            "{}{}{}",
-            ansi_dim("│"),
-            cells.join(&ansi_dim("│")),
-            ansi_dim("│")
-        ));
+        out.extend(render_table_row(row, &col_widths));
     }
 
     // Bottom border: └───┴───┘
@@ -1365,6 +1330,148 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     ));
 
     out
+}
+
+fn shrink_col_widths_to_fit(col_widths: &mut [usize], avail: usize, min_width: usize) {
+    let content_total: usize = col_widths.iter().sum();
+    if content_total == 0 {
+        return;
+    }
+
+    for w in col_widths.iter_mut() {
+        *w = (*w * avail / content_total).max(min_width);
+    }
+
+    while col_widths.iter().sum::<usize>() > avail {
+        if let Some((idx, _)) = col_widths
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > min_width)
+            .max_by_key(|(_, w)| **w)
+        {
+            col_widths[idx] -= 1;
+        } else {
+            break;
+        }
+    }
+}
+
+fn render_table_row(row: &[String], col_widths: &[usize]) -> Vec<String> {
+    let wrapped_cells: Vec<Vec<String>> = row
+        .iter()
+        .enumerate()
+        .map(|(c, styled)| wrap_table_cell(styled, col_widths.get(c).copied().unwrap_or(0)))
+        .collect();
+    let row_height = wrapped_cells
+        .iter()
+        .map(|cell| cell.len())
+        .max()
+        .unwrap_or(1);
+
+    let mut lines = Vec::with_capacity(row_height);
+    for line_idx in 0..row_height {
+        let cells: Vec<String> = wrapped_cells
+            .iter()
+            .enumerate()
+            .map(|(c, cell_lines)| {
+                let content = cell_lines.get(line_idx).map(|s| s.as_str()).unwrap_or("");
+                let col_w = col_widths.get(c).copied().unwrap_or(0);
+                let pad = col_w.saturating_sub(visible_width(content));
+                format!(" {}{} ", content, " ".repeat(pad))
+            })
+            .collect();
+        lines.push(format!(
+            "{}{}{}",
+            ansi_dim("│"),
+            cells.join(&ansi_dim("│")),
+            ansi_dim("│")
+        ));
+    }
+
+    lines
+}
+
+fn wrap_table_cell(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    for wrapped in wrap_line(text, width, "") {
+        if visible_width(&wrapped) <= width {
+            lines.push(wrapped);
+        } else {
+            lines.extend(split_overlong_ansi_line(&wrapped, width));
+        }
+    }
+
+    let lines = make_lines_self_contained(&lines);
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn split_overlong_ansi_line(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut parts = Vec::new();
+    let mut remaining = text.to_string();
+
+    while !remaining.is_empty() {
+        if visible_width(&remaining) <= width {
+            parts.push(remaining);
+            break;
+        }
+
+        let (head, tail) = split_ansi_prefix_at_width(&remaining, width);
+        if head.is_empty() {
+            break;
+        }
+        parts.push(head);
+        remaining = tail;
+    }
+
+    if parts.is_empty() {
+        vec![text.to_string()]
+    } else {
+        parts
+    }
+}
+
+fn split_ansi_prefix_at_width(text: &str, width: usize) -> (String, String) {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let mut visible = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            while i < bytes.len() && bytes[i] != b'm' {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+
+        if visible == width {
+            break;
+        }
+
+        if let Some(ch) = text[i..].chars().next() {
+            i += ch.len_utf8();
+            visible += 1;
+        } else {
+            break;
+        }
+    }
+
+    (text[..i].to_string(), text[i..].to_string())
 }
 
 fn render_heading(level: usize, text: &str) -> String {
@@ -1766,5 +1873,51 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         plain,
         headings: ctx.headings,
         links: all_links,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tables_wrap_long_cells_instead_of_clipping_them() {
+        let content = r#"
+### Flujos
+
+| Flujo | Hoy | Propuesta inicial |
+| --- | --- | --- |
+| **Crear invitación** | client-global llama a SG. SG valida rol en msUsers, valida reglas de invitación, crea `BusinessInvitation` y envía el email. | client-global llama a BFF. BFF valida permiso y rol en msUsers, llama a SG para crear `BusinessInvitation`, genera el link/token y envía el email. |
+"#;
+
+        let result = render_with_viewport(content, 72, 72);
+
+        assert!(
+            result
+                .plain
+                .iter()
+                .any(|line| line.contains("BusinessInvitation")),
+            "expected wrapped table output to preserve code-span content"
+        );
+        assert!(
+            result
+                .plain
+                .iter()
+                .any(|line| line.contains("link/token y envía el email.")),
+            "expected long proposal cell text to continue on a later wrapped line"
+        );
+        assert!(
+            result
+                .plain
+                .iter()
+                .filter(|line| line.starts_with('│'))
+                .count()
+                > 2,
+            "expected the long table row to render as multiple terminal lines"
+        );
+        assert!(
+            result.lines.iter().all(|line| visible_width(line) <= 72),
+            "expected rendered table lines to fit the viewport without truncation"
+        );
     }
 }
