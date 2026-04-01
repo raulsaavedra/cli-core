@@ -29,14 +29,11 @@ pub fn resolve_skills_dir(dest: Option<&str>) -> io::Result<PathBuf> {
 }
 
 /// Resolve the default skills destination directories.
-/// Returns both `~/.agents/skills` and `~/.claude/skills`.
+/// Returns `~/.agents/skills`.
 pub fn resolve_default_skills_dirs() -> io::Result<Vec<PathBuf>> {
     let home = dirs::home_dir()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
-    Ok(vec![
-        home.join(".agents").join("skills"),
-        home.join(".claude").join("skills"),
-    ])
+    Ok(vec![home.join(".agents").join("skills")])
 }
 
 /// Install a skill directory to the destination.

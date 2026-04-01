@@ -36,7 +36,7 @@ Small helpers for writing machine-readable and human-readable output.
 
 Helpers for installing a skill directory into an agent skills folder.
 
-- `resolve_default_skills_dirs() -> io::Result<Vec<PathBuf>>` — returns the default destinations: `~/.agents/skills` and `~/.claude/skills`
+- `resolve_default_skills_dirs() -> io::Result<Vec<PathBuf>>` — returns the default destination: `~/.agents/skills`
 - `resolve_skills_dir(dest: Option<&str>) -> io::Result<PathBuf>` — returns the absolute path of `dest`, or `~/.agents/skills` when `None`
 - `install(opts: &InstallOptions) -> io::Result<PathBuf>` — copy or symlink a skill directory to the destination; returns the installed path
 
