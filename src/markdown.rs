@@ -1313,8 +1313,20 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     ));
 
     // Data rows
-    for row in &rendered_rows {
+    for (idx, row) in rendered_rows.iter().enumerate() {
         out.extend(render_table_row(row, &col_widths));
+        if idx + 1 < rendered_rows.len() {
+            out.push(format!(
+                "{}{}{}",
+                ansi_dim("├"),
+                col_widths
+                    .iter()
+                    .map(|w| ansi_dim(&"─".repeat(w + 2)))
+                    .collect::<Vec<_>>()
+                    .join(&ansi_dim("┼")),
+                ansi_dim("┤")
+            ));
+        }
     }
 
     // Bottom border: └───┴───┘
@@ -1918,6 +1930,10 @@ mod tests {
         assert!(
             result.lines.iter().all(|line| visible_width(line) <= 72),
             "expected rendered table lines to fit the viewport without truncation"
+        );
+        assert!(
+            result.plain.iter().any(|line| line.starts_with("├")),
+            "expected wrapped tables to include row separators for readability"
         );
     }
 }
