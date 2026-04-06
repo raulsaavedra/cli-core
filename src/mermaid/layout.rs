@@ -40,8 +40,6 @@ pub enum ContentStyle {
 #[derive(Debug, Clone, Copy)]
 pub struct Padding {
     pub top: usize,
-    pub right: usize,
-    pub bottom: usize,
     pub left: usize,
 }
 
@@ -49,8 +47,6 @@ impl Padding {
     fn zero() -> Self {
         Self {
             top: 0,
-            right: 0,
-            bottom: 0,
             left: 0,
         }
     }
@@ -390,8 +386,6 @@ fn layout_subgraph(
         content: None,
         padding: Padding {
             top: SG_HEADER + SG_PAD,
-            right: SG_PAD,
-            bottom: SG_PAD,
             left: SG_PAD,
         },
         children,
