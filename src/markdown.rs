@@ -1,4 +1,11 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Theme, ThemeSet};
+use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::util::as_24_bit_terminal_escaped;
 use unicode_width::UnicodeWidthStr;
 
 // ---------------------------------------------------------------------------
@@ -146,6 +153,103 @@ fn ansi_bold_underline_256(color: u8, text: &str) -> String {
 
 fn ansi_bold_256(color: u8, text: &str) -> String {
     format!("\x1b[1m\x1b[38;5;{color}m{text}\x1b[39m\x1b[22m")
+}
+
+// ---------------------------------------------------------------------------
+// Code block highlighting
+// ---------------------------------------------------------------------------
+
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+static LOCAL_HIGHLIGHT_THEME: OnceLock<Option<Theme>> = OnceLock::new();
+
+fn syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
+}
+
+fn theme_set() -> &'static ThemeSet {
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
+}
+
+fn local_highlight_theme() -> &'static Option<Theme> {
+    LOCAL_HIGHLIGHT_THEME.get_or_init(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from)?;
+        [
+            home.join(".config/yazi/night-owl.tmTheme"),
+            home.join("src/config/yazi/night-owl.tmTheme"),
+            home.join("src/config/bat/themes/night-owl.tmTheme"),
+        ]
+        .into_iter()
+        .find_map(|path| ThemeSet::get_theme(path).ok())
+    })
+}
+
+fn highlight_theme() -> Option<&'static Theme> {
+    if let Some(theme) = local_highlight_theme().as_ref() {
+        return Some(theme);
+    }
+
+    let themes = &theme_set().themes;
+    themes
+        .get("base16-ocean.dark")
+        .or_else(|| themes.get("InspiredGitHub"))
+        .or_else(|| themes.values().next())
+}
+
+fn is_plain_text_code_lang(lang: &str) -> bool {
+    let normalized = lang.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "text" | "txt" | "plain")
+}
+
+fn syntax_for_lang<'a>(lang: &str, syntaxes: &'a SyntaxSet) -> Option<&'a SyntaxReference> {
+    let normalized = lang.trim().to_ascii_lowercase();
+    let candidate = match normalized.as_str() {
+        "rs" => "rust",
+        "sh" | "zsh" | "shell" => "bash",
+        "js" | "mjs" | "cjs" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "md" => "markdown",
+        "yml" => "yaml",
+        "" => return None,
+        other => other,
+    };
+
+    syntaxes.find_syntax_by_token(candidate)
+}
+
+fn highlighted_code_lines(lang: &str, code: &str) -> Option<Vec<String>> {
+    let syntaxes = syntax_set();
+    let syntax = syntax_for_lang(lang, syntaxes)?;
+    let theme = highlight_theme()?;
+    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut lines = Vec::new();
+
+    for code_line in code.split('\n') {
+        let ranges = highlighter.highlight_line(code_line, syntaxes).ok()?;
+        lines.push(format!(
+            "{}\x1b[0m",
+            as_24_bit_terminal_escaped(&ranges, false)
+        ));
+    }
+
+    Some(lines)
+}
+
+fn render_code_lines(lang: &str, code: &str) -> Vec<String> {
+    if is_plain_text_code_lang(lang) {
+        return code
+            .split('\n')
+            .map(|code_line| format!("  {code_line}"))
+            .collect();
+    }
+
+    match highlighted_code_lines(lang, code) {
+        Some(lines) => lines.into_iter().map(|line| format!("  {line}")).collect(),
+        None => code
+            .split('\n')
+            .map(|code_line| format!("  {}", ansi_dim(code_line)))
+            .collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1215,9 +1319,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                         continue;
                     }
                 }
-                for code_line in code.split('\n') {
-                    out.push(format!("  {}", ansi_dim(code_line)));
-                }
+                out.extend(render_code_lines(lang, code));
                 out.push(String::new());
             }
 
@@ -1891,6 +1993,55 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_code_blocks_are_syntax_highlighted() {
+        let content = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
+        let result = render_with_viewport(content, 72, 72);
+
+        assert!(
+            result.rendered.contains("\x1b[38;2;"),
+            "expected rust code block to include truecolor ANSI styling"
+        );
+        assert!(
+            result.lines.iter().any(|line| line.contains("\x1b[0m")),
+            "expected highlighted code lines to close their ANSI styling"
+        );
+        assert!(
+            result.plain.iter().any(|line| line.contains("fn main()")),
+            "expected highlighted code to preserve plain-text output"
+        );
+    }
+
+    #[test]
+    fn local_night_owl_theme_is_preferred_when_available() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let theme_path = home.join("src/config/yazi/night-owl.tmTheme");
+        if !theme_path.exists() {
+            return;
+        }
+
+        let theme = highlight_theme().expect("expected a syntax highlight theme");
+
+        assert_eq!(theme.name.as_deref(), Some("Night Owl Custom"));
+    }
+
+    #[test]
+    fn text_code_blocks_use_plain_rendering() {
+        let content = "```text\nplain text\n```";
+        let result = render_with_viewport(content, 72, 72);
+
+        assert!(
+            result.plain.iter().any(|line| line == "plain text"),
+            "expected text code block to preserve plain-text output"
+        );
+        assert!(
+            !result.rendered.contains("\x1b[2mplain text\x1b[22m"),
+            "expected text code block to render without muted styling"
+        );
+    }
 
     #[test]
     fn tables_wrap_long_cells_instead_of_clipping_them() {
