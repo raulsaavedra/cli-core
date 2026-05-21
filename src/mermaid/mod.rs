@@ -40,6 +40,10 @@ mod tests {
         out
     }
 
+    fn count_occurrences(haystack: &str, needle: &str) -> usize {
+        haystack.match_indices(needle).count()
+    }
+
     #[test]
     fn render_simple_td() {
         let code = "graph TD\n  A[Start] --> B[End]";
@@ -74,6 +78,65 @@ mod tests {
         println!("=== Diamond ===\n{}\n", text);
         assert!(text.contains("Start"));
         assert!(text.contains("< Decision >"));
+        assert!(!text.contains("└▼"));
+        assert!(!text.contains("▼┘"));
+    }
+
+    #[test]
+    fn render_go_handler_relationships() {
+        let code = r#"flowchart TD
+    HandlerInterface[http.Handler] -->|requires| ServeHTTP[ServeHTTP w,r]
+    ServeMux[ServeMux] -->|implements| HandlerInterface
+    HandlerFunc[HandlerFunc] -->|implements| HandlerInterface
+    PlainFunction[health function] -->|adapted by| HandlerFunc
+    ServeMux -->|stores matched handler| HandlerFunc"#;
+        let lines = render_flowchart(code, 120).unwrap();
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let text = plain.join("\n");
+        println!("=== Go Handler Relationships ===\n{}\n", text);
+        assert!(text.contains("ServeMux"));
+        assert!(text.contains("health function"));
+        assert!(text.contains("HandlerFunc"));
+        assert!(text.contains("http.Handler"));
+        assert!(text.contains("ServeHTTP w,r"));
+        assert!(text.contains("stores matched handler"));
+        assert!(text.contains("adapted by"));
+        assert_eq!(count_occurrences(&text, "stores matched handler"), 1);
+        assert_eq!(count_occurrences(&text, "adapted by"), 1);
+        assert_eq!(count_occurrences(&text, "implements"), 2);
+        assert_eq!(count_occurrences(&text, "requires"), 1);
+        assert!(!text.contains("stadapted byed handler"));
+        assert!(!text.contains("implementsents"));
+        assert!(!text.contains("implementslements"));
+        assert!(!text.contains("└───────────────────│"));
+        assert!(!text.contains("▼────"));
+        assert!(!text.contains("────▼"));
+        assert!(!text.contains("││"));
+        assert!(!text.contains("│▼"));
+    }
+
+    #[test]
+    fn render_labeled_decision_branches_to_same_layer() {
+        let code = r#"flowchart TD
+    Decision{Decision}
+    Decision -->|left path| Left[Left branch]
+    Decision -->|middle path| Middle[Middle branch]
+    Decision -->|right path| Right[Right branch]"#;
+        let lines = render_flowchart(code, 120).unwrap();
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let text = plain.join("\n");
+        println!("=== Labeled Decision Branches ===\n{}\n", text);
+        assert_eq!(count_occurrences(&text, "left path"), 1);
+        assert_eq!(count_occurrences(&text, "middle path"), 1);
+        assert_eq!(count_occurrences(&text, "right path"), 1);
+        assert!(!text.contains("left pathmiddle"));
+        assert!(!text.contains("middle pathright"));
+        assert!(!text.contains("│left path"));
+        assert!(!text.contains("│middle path"));
+        assert!(!text.contains("│right path"));
+        assert!(!text.contains("││"));
+        assert!(!text.contains("│├"));
+        assert!(!text.contains("▼▼"));
     }
 
     #[test]
@@ -125,6 +188,7 @@ mod tests {
         println!("=== Team Management ===\n{}\n", text);
         assert!(text.contains("client-global"));
         assert!(text.contains("merge"));
+        assert!(!text.contains("server-global ││"));
     }
 
     #[test]
@@ -163,5 +227,38 @@ mod tests {
         assert!(text.contains("AcceptBusinessInvitation"));
         assert!(text.contains("BFF"));
         assert!(text.contains("SNS UserBusinessCreated"));
+        assert_eq!(count_occurrences(&text, "Usuario no registrado"), 1);
+        assert_eq!(count_occurrences(&text, "Ya asociado al Business"), 1);
+        assert_eq!(count_occurrences(&text, "Registrado, sin asociación"), 1);
+        assert!(!text.contains("Usuario no registrado asociado"));
+        assert!(!text.contains("Registr┆do"));
+        assert!(!text.contains("│Ya asociado"));
+        assert!(!text.contains("││"));
+        assert!(!text.contains("│├"));
+        assert!(!text.contains("▼▼"));
+    }
+
+    #[test]
+    fn render_layered_dependency_graph() {
+        let code = r#"flowchart TD
+    Tests[Tests] --> HTTP[HTTP handlers]
+    Tests --> Memory[Memory store]
+    Config[Config/startup] --> Memory
+    Config --> SQL[SQL store]
+    HTTP --> Ledger[internal/ledger]
+    Memory --> Ledger
+    SQL --> Ledger"#;
+        let lines = render_flowchart(code, 120).unwrap();
+        let plain: Vec<String> = lines.iter().map(|l| strip_ansi(l)).collect();
+        let text = plain.join("\n");
+        println!("=== Layered Dependency Graph ===\n{}\n", text);
+        assert!(text.contains("HTTP handlers"));
+        assert!(text.contains("Memory store"));
+        assert!(text.contains("SQL store"));
+        assert!(text.contains("internal/ledger"));
+        assert!(!text.contains("││"));
+        assert!(!text.contains("▼▼"));
+        assert!(!text.contains("▼────"));
+        assert!(!text.contains("────▼"));
     }
 }

@@ -45,10 +45,7 @@ pub struct Padding {
 
 impl Padding {
     fn zero() -> Self {
-        Self {
-            top: 0,
-            left: 0,
-        }
+        Self { top: 0, left: 0 }
     }
 }
 
@@ -67,6 +64,7 @@ pub struct LayoutEdge {
     pub to_y: usize,
     pub style: EdgeStyle,
     pub label: Option<String>,
+    pub lane: usize,
 }
 
 #[derive(Debug)]
@@ -181,11 +179,17 @@ struct Item {
     height: usize,
 }
 
+struct ItemEdge {
+    from: usize,
+    to: usize,
+    has_label: bool,
+}
+
 /// Assign layers, order, and position a set of items connected by edges.
 /// Returns Vec<(item_index, x, y)>.
 fn layout_items(
     items: &[Item],
-    edges: &[(usize, usize)],
+    edges: &[ItemEdge],
     is_horizontal: bool,
     gap_y: usize,
 ) -> Vec<(usize, usize, usize)> {
@@ -194,27 +198,7 @@ fn layout_items(
         return Vec::new();
     }
 
-    // Layer assignment: longest path via Bellman-Ford relaxation.
-    // Iterates until no layer changes, guaranteeing correct longest paths
-    // even when a node's layer increases after its successors were processed.
-    let mut layers = vec![0usize; n];
-    let mut iter = 0;
-    loop {
-        let mut changed = false;
-        for &(from, to) in edges {
-            if from < n && to < n {
-                let new_layer = layers[from] + 1;
-                if new_layer > layers[to] {
-                    layers[to] = new_layer;
-                    changed = true;
-                }
-            }
-        }
-        iter += 1;
-        if !changed || iter > n * n {
-            break;
-        }
-    }
+    let layers = assign_layers(n, edges);
 
     // Order within layers (barycenter heuristic)
     let max_layer = layers.iter().copied().max().unwrap_or(0);
@@ -236,7 +220,9 @@ fn layout_items(
                 .map(|&node_idx| {
                     let mut sum = 0.0;
                     let mut count = 0;
-                    for &(from, to) in edges {
+                    for edge in edges {
+                        let from = edge.from;
+                        let to = edge.to;
                         if to == node_idx {
                             if let Some(&pos) = prev_positions.get(&from) {
                                 sum += pos as f64;
@@ -278,7 +264,13 @@ fn layout_items(
         }
     } else {
         let mut y = 0;
-        for layer in &layer_nodes {
+        let layer_widths: Vec<usize> = layer_nodes
+            .iter()
+            .map(|layer| layer_width(layer, items))
+            .collect();
+        let canvas_w = layer_widths.iter().copied().max().unwrap_or(0);
+
+        for (layer_idx, layer) in layer_nodes.iter().enumerate() {
             if layer.is_empty() {
                 continue;
             }
@@ -287,16 +279,64 @@ fn layout_items(
                 .map(|&i| items[i].height)
                 .max()
                 .unwrap_or(NODE_HEIGHT);
-            let mut x = 0;
+            let mut x = canvas_w.saturating_sub(layer_widths[layer_idx]) / 2;
             for &idx in layer {
                 result.push((idx, x, y));
                 x += items[idx].width + GAP_X;
             }
-            y += max_h + gap_y;
+            let labeled_lanes = if layer_idx + 1 < layer_nodes.len() {
+                labeled_edges_to_layer(edges, &layers, layer_idx + 1)
+            } else {
+                0
+            };
+            let dynamic_gap = if labeled_lanes > 1 {
+                gap_y.max(labeled_lanes * 3)
+            } else {
+                gap_y
+            };
+            y += max_h + dynamic_gap;
         }
     }
 
     result
+}
+
+fn assign_layers(n: usize, edges: &[ItemEdge]) -> Vec<usize> {
+    // Longest-path layering. Iterates until no layer changes, guaranteeing
+    // correct layers even when a node's layer increases after its successors
+    // were processed.
+    let mut layers = vec![0usize; n];
+    let mut iter = 0;
+    loop {
+        let mut changed = false;
+        for edge in edges {
+            if edge.from < n && edge.to < n {
+                let new_layer = layers[edge.from] + 1;
+                if new_layer > layers[edge.to] {
+                    layers[edge.to] = new_layer;
+                    changed = true;
+                }
+            }
+        }
+        iter += 1;
+        if !changed || iter > n * n {
+            break;
+        }
+    }
+    layers
+}
+
+fn layer_width(layer: &[usize], items: &[Item]) -> usize {
+    let item_width: usize = layer.iter().map(|&idx| items[idx].width).sum();
+    let gap_width = layer.len().saturating_sub(1) * GAP_X;
+    item_width + gap_width
+}
+
+fn labeled_edges_to_layer(edges: &[ItemEdge], layers: &[usize], layer: usize) -> usize {
+    edges
+        .iter()
+        .filter(|edge| edge.has_label && layers.get(edge.to).copied() == Some(layer))
+        .count()
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +377,7 @@ fn layout_subgraph(
         .map(|(local, &global)| (global, local))
         .collect();
 
-    let edges: Vec<(usize, usize)> = graph
+    let edges: Vec<ItemEdge> = graph
         .edges
         .iter()
         .filter_map(|e| {
@@ -345,7 +385,11 @@ fn layout_subgraph(
             let ti = graph.node_index(&e.to)?;
             let lfi = idx_set.get(&fi)?;
             let lti = idx_set.get(&ti)?;
-            Some((*lfi, *lti))
+            Some(ItemEdge {
+                from: *lfi,
+                to: *lti,
+                has_label: e.label.is_some(),
+            })
         })
         .collect();
 
@@ -445,8 +489,8 @@ fn layout_outer(
     }
 
     // Build outer edges
-    let mut outer_edges: Vec<(usize, usize)> = Vec::new();
-    let mut seen_edges: HashMap<(usize, usize), ()> = HashMap::new();
+    let mut outer_edges: Vec<ItemEdge> = Vec::new();
+    let mut seen_edges: HashMap<(usize, usize), usize> = HashMap::new();
 
     for edge in &graph.edges {
         let from_global = match graph.node_index(&edge.from) {
@@ -471,9 +515,18 @@ fn layout_outer(
         };
 
         if let (Some(f), Some(t)) = (from_outer, to_outer) {
-            if f != t && !seen_edges.contains_key(&(f, t)) {
-                outer_edges.push((f, t));
-                seen_edges.insert((f, t), ());
+            if f != t {
+                if let Some(&edge_idx) = seen_edges.get(&(f, t)) {
+                    outer_edges[edge_idx].has_label |= edge.label.is_some();
+                } else {
+                    let edge_idx = outer_edges.len();
+                    outer_edges.push(ItemEdge {
+                        from: f,
+                        to: t,
+                        has_label: edge.label.is_some(),
+                    });
+                    seen_edges.insert((f, t), edge_idx);
+                }
             }
         }
     }
@@ -591,7 +644,7 @@ fn route_all_edges(
         })
         .collect();
 
-    graph
+    let mut edges: Vec<LayoutEdge> = graph
         .edges
         .iter()
         .filter_map(|edge| {
@@ -601,7 +654,7 @@ fn route_all_edges(
             let &(tx, ty, tw, th) = positions.get(to_label)?;
 
             let (from_x, from_y, to_x, to_y) = if is_horizontal {
-                (fx + fw, fy + fh / 2, tx, ty + th / 2)
+                (fx + fw + 1, fy + fh / 2, tx, ty + th / 2)
             } else {
                 (fx + fw / 2, fy + fh, tx + tw / 2, ty)
             };
@@ -613,7 +666,43 @@ fn route_all_edges(
                 to_y,
                 style: edge.style,
                 label: edge.label.clone(),
+                lane: 0,
             })
         })
-        .collect()
+        .collect();
+
+    if !is_horizontal {
+        assign_top_down_lanes(&mut edges);
+    }
+
+    edges
+}
+
+fn assign_top_down_lanes(edges: &mut [LayoutEdge]) {
+    let mut target_row_groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (idx, edge) in edges.iter().enumerate() {
+        if edge.label.is_some() {
+            target_row_groups.entry(edge.to_y).or_default().push(idx);
+        }
+    }
+
+    for group in target_row_groups.values_mut() {
+        group.sort_by_key(|&idx| {
+            let edge = &edges[idx];
+            let label_len = edge
+                .label
+                .as_ref()
+                .map(|label| label.chars().count())
+                .unwrap_or(0);
+            (
+                edge.from_x.min(edge.to_x),
+                edge.from_x.abs_diff(edge.to_x),
+                label_len,
+            )
+        });
+
+        for (lane, &edge_idx) in group.iter().enumerate() {
+            edges[edge_idx].lane = lane;
+        }
+    }
 }

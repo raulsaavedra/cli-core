@@ -41,6 +41,10 @@ pub fn render_to_lines(_graph: &super::graph::FlowGraph, layout: &LayoutResult) 
     for edge in &layout.edges {
         draw_edge(&mut grid, &mut styles, edge);
     }
+    for edge in &layout.edges {
+        draw_top_down_label(&mut grid, &mut styles, edge);
+    }
+    collapse_adjacent_vertical_edges(&mut grid, &mut styles);
 
     // 3. Convert to ANSI-styled strings with 2-space indent
     let mut lines = Vec::with_capacity(h);
@@ -50,7 +54,7 @@ pub fn render_to_lines(_graph: &super::graph::FlowGraph, layout: &LayoutResult) 
     }
 
     // Trim trailing blank lines
-    while lines.last().map_or(false, |l| l.trim().is_empty()) {
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
         lines.pop();
     }
 
@@ -251,26 +255,32 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
     let ty = edge.to_y;
     let is_arrow = matches!(edge.style, EdgeStyle::Arrow);
 
-    let is_vertical = (fx == tx) || (fx as isize - tx as isize).unsigned_abs() <= 1;
     let is_td = ty > fy; // top-to-bottom direction
 
     if is_td {
         let has_label = edge.label.is_some();
-        // Arrow 2 rows above target if labeled, 1 row if not
-        let arrow_gap = if has_label { 2 } else { 1 };
+        let arrow_y = if has_label {
+            ty.saturating_sub(1 + edge.lane * 3)
+        } else {
+            ty.saturating_sub(1)
+        };
+        let label_y = has_label.then(|| arrow_y.saturating_sub(2));
+        let stem_x = fx;
+        let is_vertical = stem_x == tx || stem_x.abs_diff(tx) <= 1;
 
         if is_vertical {
             // Straight vertical
             let x = tx;
-            let arrow_y = if is_arrow {
-                ty.saturating_sub(arrow_gap)
-            } else {
-                ty
-            };
-            for y in fy..arrow_y {
+            let end_y = if is_arrow { arrow_y } else { ty };
+            for y in fy..end_y {
+                if Some(y) == label_y {
+                    continue;
+                }
                 set_edge(grid, styles, x, y, '│', CellStyle::EdgeLine, max_x, max_y);
             }
             if is_arrow {
+                clear_edge_cell(grid, styles, x.saturating_sub(1), arrow_y, max_x, max_y);
+                clear_edge_cell(grid, styles, x + 1, arrow_y, max_x, max_y);
                 set_edge(
                     grid,
                     styles,
@@ -284,19 +294,35 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
             }
         } else {
             // L-path: vertical down, corner, horizontal, arrow
-            let turn_y = ty.saturating_sub(arrow_gap);
+            let turn_y = if is_arrow {
+                arrow_y.saturating_sub(1).max(fy)
+            } else {
+                ty
+            };
 
             // Vertical segment
             for y in fy..turn_y {
-                set_edge(grid, styles, fx, y, '│', CellStyle::EdgeLine, max_x, max_y);
+                if Some(y) == label_y {
+                    continue;
+                }
+                set_edge(
+                    grid,
+                    styles,
+                    stem_x,
+                    y,
+                    '│',
+                    CellStyle::EdgeLine,
+                    max_x,
+                    max_y,
+                );
             }
 
             // Corner
-            let corner_ch = if tx > fx { '└' } else { '┘' };
+            let corner_ch = if tx > stem_x { '└' } else { '┘' };
             set_edge(
                 grid,
                 styles,
-                fx,
+                stem_x,
                 turn_y,
                 corner_ch,
                 CellStyle::EdgeLine,
@@ -305,7 +331,11 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
             );
 
             // Horizontal dashes
-            let (inner_start, inner_end) = if tx > fx { (fx + 1, tx) } else { (tx + 1, fx) };
+            let (inner_start, inner_end) = if tx > stem_x {
+                (stem_x + 1, tx)
+            } else {
+                (tx + 1, stem_x)
+            };
             for x in inner_start..inner_end {
                 set_edge(
                     grid,
@@ -321,11 +351,34 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
 
             // Arrow or endpoint
             if is_arrow {
+                if tx > stem_x {
+                    clear_edge_cell(grid, styles, tx + 1, arrow_y, max_x, max_y);
+                } else {
+                    clear_edge_cell(grid, styles, tx.saturating_sub(1), arrow_y, max_x, max_y);
+                }
+                if turn_y < arrow_y {
+                    let target_corner = if tx > stem_x { '┐' } else { '┌' };
+                    set_edge(
+                        grid,
+                        styles,
+                        tx,
+                        turn_y,
+                        target_corner,
+                        CellStyle::EdgeLine,
+                        max_x,
+                        max_y,
+                    );
+                }
+                if !has_label {
+                    for y in (turn_y + 1)..arrow_y {
+                        set_edge(grid, styles, tx, y, '│', CellStyle::EdgeLine, max_x, max_y);
+                    }
+                }
                 set_edge(
                     grid,
                     styles,
                     tx,
-                    turn_y,
+                    arrow_y,
                     '▼',
                     CellStyle::ArrowTip,
                     max_x,
@@ -343,19 +396,6 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
                     max_y,
                 );
             }
-        }
-
-        // Label: centered above the target node, on the row between arrow and target
-        if let Some(ref label) = edge.label {
-            let label_y = ty.saturating_sub(1);
-            // Center label on the target's x position
-            let label_len = label.chars().count();
-            let label_x = if label_len < 2 {
-                tx
-            } else {
-                tx.saturating_sub(label_len / 2)
-            };
-            draw_label_at(grid, styles, label_x, label_y, label, max_x, max_y);
         }
     } else if tx > fx {
         // Left-to-right (LR layout)
@@ -387,30 +427,11 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
                 );
             }
         } else {
-            // L-path for LR: horizontal, corner, vertical, arrow
-            let turn_x = tx.saturating_sub(1);
-
-            // Horizontal with inline label
-            if let Some(ref label) = edge.label {
-                let span = turn_x.saturating_sub(fx);
-                draw_label_on_horiz(grid, styles, fx, turn_x, fy, label, span, max_x, max_y);
-            } else {
-                for x in fx..turn_x {
-                    set_edge(grid, styles, x, fy, '─', CellStyle::EdgeLine, max_x, max_y);
-                }
-            }
+            // Dogleg path for LR: leave the source, change rows, then enter the target.
+            let arrow_x = if is_arrow { tx.saturating_sub(1) } else { tx };
+            let turn_x = fx.min(arrow_x);
 
             if ty > fy {
-                set_edge(
-                    grid,
-                    styles,
-                    turn_x,
-                    fy,
-                    '┐',
-                    CellStyle::EdgeLine,
-                    max_x,
-                    max_y,
-                );
                 for y in (fy + 1)..ty {
                     set_edge(
                         grid,
@@ -423,17 +444,17 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
                         max_y,
                     );
                 }
-            } else {
                 set_edge(
                     grid,
                     styles,
                     turn_x,
-                    fy,
-                    '┘',
+                    ty,
+                    '└',
                     CellStyle::EdgeLine,
                     max_x,
                     max_y,
                 );
+            } else {
                 for y in (ty + 1)..fy {
                     set_edge(
                         grid,
@@ -446,13 +467,42 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
                         max_y,
                     );
                 }
+                set_edge(
+                    grid,
+                    styles,
+                    turn_x,
+                    ty,
+                    '┌',
+                    CellStyle::EdgeLine,
+                    max_x,
+                    max_y,
+                );
+            }
+
+            if let Some(ref label) = edge.label {
+                let span = arrow_x.saturating_sub(turn_x + 1);
+                draw_label_on_horiz(
+                    grid,
+                    styles,
+                    turn_x + 1,
+                    arrow_x,
+                    ty,
+                    label,
+                    span,
+                    max_x,
+                    max_y,
+                );
+            } else {
+                for x in (turn_x + 1)..arrow_x {
+                    set_edge(grid, styles, x, ty, '─', CellStyle::EdgeLine, max_x, max_y);
+                }
             }
 
             if is_arrow {
                 set_edge(
                     grid,
                     styles,
-                    turn_x,
+                    arrow_x,
                     ty,
                     '▶',
                     CellStyle::ArrowTip,
@@ -462,6 +512,56 @@ fn draw_edge(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &Layou
             }
         }
     }
+}
+
+fn collapse_adjacent_vertical_edges(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>]) {
+    for y in 0..grid.len() {
+        for x in 1..grid[y].len() {
+            if styles[y][x - 1] == CellStyle::EdgeLine
+                && styles[y][x] == CellStyle::EdgeLine
+                && grid[y][x - 1] == '│'
+                && grid[y][x] == '│'
+            {
+                grid[y][x] = ' ';
+                styles[y][x] = CellStyle::Empty;
+            } else if styles[y][x - 1] == CellStyle::EdgeLine
+                && styles[y][x] == CellStyle::EdgeLine
+                && grid[y][x - 1] == '│'
+                && matches!(grid[y][x], '├' | '┤' | '┼')
+            {
+                grid[y][x - 1] = ' ';
+                styles[y][x - 1] = CellStyle::Empty;
+            }
+        }
+    }
+}
+
+fn draw_top_down_label(grid: &mut [Vec<char>], styles: &mut [Vec<CellStyle>], edge: &LayoutEdge) {
+    if edge.to_y <= edge.from_y {
+        return;
+    }
+
+    let Some(label) = edge.label.as_ref() else {
+        return;
+    };
+
+    let max_y = grid.len();
+    let max_x = if max_y > 0 { grid[0].len() } else { 0 };
+    let fx = edge.from_x;
+    let tx = edge.to_x;
+    let ty = edge.to_y;
+    let arrow_y = ty.saturating_sub(1 + edge.lane * 3);
+    let label_y = arrow_y.saturating_sub(2);
+    let is_vertical = fx == tx || fx.abs_diff(tx) <= 1;
+    let label_len = label.chars().count();
+    let label_x = if is_vertical {
+        tx.saturating_sub(label_len / 2)
+    } else {
+        let mid_x = (fx + tx) / 2;
+        mid_x.saturating_sub(label_len / 2)
+    };
+
+    draw_label_at(grid, styles, label_x, label_y, label, max_x, max_y);
 }
 
 /// Draw a label at a specific position, truncating if needed.
@@ -487,6 +587,8 @@ fn draw_label_at(
         t.push('…');
         t
     };
+    clear_edge_cell(grid, styles, x.saturating_sub(1), y, max_x, max_y);
+    clear_edge_cell(grid, styles, x + display.len(), y, max_x, max_y);
     for (i, &ch) in display.iter().enumerate() {
         let cx = x + i;
         if cx < max_x {
@@ -542,13 +644,17 @@ fn draw_label_on_horiz(
     } else if total > 2 {
         // Truncate
         let avail = total.saturating_sub(1);
-        for i in 0..avail.saturating_sub(1).min(chars.len()) {
+        for (i, &ch) in chars
+            .iter()
+            .enumerate()
+            .take(avail.saturating_sub(1).min(chars.len()))
+        {
             set_edge(
                 grid,
                 styles,
                 start_x + i,
                 y,
-                chars[i],
+                ch,
                 CellStyle::EdgeLabel,
                 max_x,
                 max_y,
@@ -608,14 +714,82 @@ fn set_edge(
             | CellStyle::CircleLabel
             | CellStyle::SubgraphBorder
             | CellStyle::SubgraphLabel
-            | CellStyle::EdgeLabel => {
-                // Don't overwrite node cells
+            | CellStyle::EdgeLabel
+            | CellStyle::ArrowTip => {
+                // Don't overwrite content cells or arrowheads with later edge segments.
+            }
+            CellStyle::EdgeLine if matches!(style, CellStyle::EdgeLine) => {
+                grid[y][x] = merge_edge_chars(grid[y][x], ch);
             }
             _ => {
                 grid[y][x] = ch;
                 styles[y][x] = style;
             }
         }
+    }
+}
+
+fn merge_edge_chars(existing: char, incoming: char) -> char {
+    edge_mask_to_char(edge_char_mask(existing) | edge_char_mask(incoming))
+}
+
+fn edge_char_mask(ch: char) -> u8 {
+    const N: u8 = 1;
+    const E: u8 = 2;
+    const S: u8 = 4;
+    const W: u8 = 8;
+
+    match ch {
+        '│' => N | S,
+        '─' => E | W,
+        '└' => N | E,
+        '┘' => N | W,
+        '┌' => S | E,
+        '┐' => S | W,
+        '├' => N | E | S,
+        '┤' => N | S | W,
+        '┬' => E | S | W,
+        '┴' => N | E | W,
+        '┼' => N | E | S | W,
+        _ => 0,
+    }
+}
+
+fn edge_mask_to_char(mask: u8) -> char {
+    const N: u8 = 1;
+    const E: u8 = 2;
+    const S: u8 = 4;
+    const W: u8 = 8;
+
+    match mask {
+        m if m == (N | S) => '│',
+        m if m == (E | W) => '─',
+        m if m == (N | E) => '└',
+        m if m == (N | W) => '┘',
+        m if m == (S | E) => '┌',
+        m if m == (S | W) => '┐',
+        m if m == (N | E | S) => '├',
+        m if m == (N | S | W) => '┤',
+        m if m == (E | S | W) => '┬',
+        m if m == (N | E | W) => '┴',
+        m if m == (N | E | S | W) => '┼',
+        m if m & (N | S) != 0 => '│',
+        m if m & (E | W) != 0 => '─',
+        _ => ' ',
+    }
+}
+
+fn clear_edge_cell(
+    grid: &mut [Vec<char>],
+    styles: &mut [Vec<CellStyle>],
+    x: usize,
+    y: usize,
+    max_x: usize,
+    max_y: usize,
+) {
+    if y < max_y && x < max_x && matches!(styles[y][x], CellStyle::EdgeLine) {
+        grid[y][x] = ' ';
+        styles[y][x] = CellStyle::Empty;
     }
 }
 
@@ -658,5 +832,33 @@ fn render_styled_line(chars: &[char], cell_styles: &[CellStyle]) -> String {
         String::new()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collapse_adjacent_vertical_edges, merge_edge_chars, CellStyle};
+
+    #[test]
+    fn edge_merging_preserves_junction_geometry() {
+        assert_eq!(merge_edge_chars('│', '─'), '┼');
+        assert_eq!(merge_edge_chars('└', '│'), '├');
+        assert_eq!(merge_edge_chars('┘', '│'), '┤');
+        assert_eq!(merge_edge_chars('─', '┌'), '┬');
+        assert_eq!(merge_edge_chars('─', '└'), '┴');
+    }
+
+    #[test]
+    fn adjacent_vertical_cleanup_keeps_junctions_readable() {
+        let mut grid = vec![vec!['│', '├', '│', '│']];
+        let mut styles = vec![vec![CellStyle::EdgeLine; 4]];
+
+        collapse_adjacent_vertical_edges(&mut grid, &mut styles);
+
+        assert_eq!(grid[0], vec![' ', '├', '│', ' ']);
+        assert_eq!(styles[0][0], CellStyle::Empty);
+        assert_eq!(styles[0][1], CellStyle::EdgeLine);
+        assert_eq!(styles[0][2], CellStyle::EdgeLine);
+        assert_eq!(styles[0][3], CellStyle::Empty);
     }
 }
