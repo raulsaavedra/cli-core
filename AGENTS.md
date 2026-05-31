@@ -14,11 +14,17 @@ Current modules (under `src/`):
 - `sqlite`: file-backed SQLite opening and bootstrap helpers via rusqlite (`open_sqlite`, `apply_pragmas`, `db_path`, `ensure_dir_for_file`)
 - `stdio`: stdin helpers (`read_stdin`)
 - `markdown`: terminal Markdown rendering and metadata extraction (`render`, `Heading`, `Link`, `RenderResult`)
+- `nvim`: structured Neovim handoff helpers (`NvimHandoff`, `NvimTarget`, `launch_handoff`, `NvimQuitCwd`)
 
 Non-goals:
 - No app-specific command definitions or business logic
 - No schemas or migrations tied to one CLI
 - No remote service clients unless they are broadly reusable and clearly in scope
+
+Neovim handoff contract:
+- `NVIM_HANDOFF` points Neovim at a JSON handoff payload.
+- `NVIM_QUIT_CWD_FILE` points Neovim at a writable cwd signal file.
+- Keep these names protocol-scoped; do not encode personal, app-specific, or library-ownership prefixes into the cross-process contract.
 
 API policy:
 - Keep exports in `src/*.rs`, re-export via `src/lib.rs`

@@ -10,6 +10,7 @@ Shared Rust crate for building local and agent-friendly CLIs.
 - `stdio` — read piped stdin content
 - `markdown` — render Markdown in the terminal and extract plain-text metadata
 - `ansi` — parse ANSI-styled strings into ratatui `Span` objects for TUI rendering
+- `nvim` — launch Neovim with structured handoff payloads and detect quit-to-terminal cwd handoff requests
 
 The crate is best thought of as an opinionated utility library for local-first CLIs, not a full CLI framework.
 
@@ -113,6 +114,23 @@ Bridge between the markdown renderer's ANSI output and ratatui's styled text mod
 - `parse_line(s: &str) -> Line<'static>` — parse a single ANSI-styled string into a ratatui `Line`
 - `parse_lines(lines: &[String]) -> Vec<Line<'static>>` — parse multiple lines at once
 
+### `nvim`
+
+Structured Neovim handoff helpers for CLIs that temporarily leave a TUI, open Neovim, and then decide whether to restore the TUI or return to the shell.
+
+- `NvimHandoff` — JSON-serializable payload with source, action, cwd, targets, and context
+- `NvimTarget` — file or directory target metadata for the handoff payload
+- `write_handoff_file(&NvimHandoff) -> Result<PathBuf, String>` — write a handoff payload to a temp JSON file
+- `launch_handoff(&NvimHandoff) -> Result<ExitStatus, String>` — launch `nvim` with `NVIM_HANDOFF` pointing at the handoff file
+- `NvimQuitCwd::ensure() -> Result<NvimQuitCwd, String>` — ensure child processes have a `NVIM_QUIT_CWD_FILE` signal file
+- `quit_to_terminal_requested() -> bool` — return true when the current quit-cwd signal file exists and has content
+- `editor_is_neovim(editor: &str) -> bool` — detect whether an editor command resolves to `nvim`
+
+Environment contracts:
+
+- `NVIM_HANDOFF` points Neovim at the structured JSON handoff file.
+- `NVIM_QUIT_CWD_FILE` points Neovim at a writable file. A Neovim quit-to-terminal action writes the target cwd into that file; the parent CLI can then exit instead of restoring its TUI, and a shell wrapper can `cd` to the written directory.
+
 ## Development
 
 ```bash
@@ -131,6 +149,7 @@ Included:
 - terminal rendering utilities
 - skill-install helpers for agent workflows
 - ANSI-to-ratatui conversion for TUI consumers
+- Neovim handoff helpers for local CLI/TUI workflows
 
 Not included:
 
