@@ -112,8 +112,20 @@ pub fn write_handoff_file(handoff: &NvimHandoff) -> Result<PathBuf, String> {
 
 pub fn launch_handoff(handoff: &NvimHandoff) -> Result<ExitStatus, String> {
     let handoff_path = write_handoff_file(handoff)?;
-    let status = Command::new("nvim")
-        .env(HANDOFF_ENV, &handoff_path)
+    let mut command = Command::new("nvim");
+    command.env(HANDOFF_ENV, &handoff_path);
+    // Open the first file target on nvim's command line so it boots straight
+    // into the buffer instead of painting the empty start screen for a frame
+    // before the VimEnter handler edits it. Directory/explore handoffs keep the
+    // bare launch so the custom explorer owns the first screen.
+    if let Some(target) = handoff_argv_target(handoff) {
+        let path = absolutize(&target.path, handoff.cwd.as_deref());
+        if let Some(line) = target.line {
+            command.arg(format!("+{line}"));
+        }
+        command.arg(path);
+    }
+    let status = command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -121,6 +133,31 @@ pub fn launch_handoff(handoff: &NvimHandoff) -> Result<ExitStatus, String> {
         .map_err(|error| format!("open nvim: {error}"));
     let _ = fs::remove_file(&handoff_path);
     status
+}
+
+/// First target eligible to be opened directly on nvim's command line: a file
+/// target, unless the handoff is an explorer action (which owns its own screen).
+fn handoff_argv_target(handoff: &NvimHandoff) -> Option<&NvimTarget> {
+    if handoff.action == "explore" {
+        return None;
+    }
+    handoff
+        .targets
+        .first()
+        .filter(|target| target.kind == "file")
+}
+
+/// Resolve a possibly-relative target path against the handoff cwd so nvim
+/// opens it regardless of the terminal's working directory.
+fn absolutize(path: &str, cwd: Option<&str>) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match cwd {
+        Some(base) if !base.is_empty() => Path::new(base).join(path),
+        _ => path.to_path_buf(),
+    }
 }
 
 impl NvimQuitCwd {
@@ -350,5 +387,48 @@ mod tests {
         );
         assert!(path.exists());
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn argv_target_is_first_file_for_edit_action() {
+        let handoff = NvimHandoff::new("diff", "edit")
+            .cwd("/repo")
+            .target(NvimTarget::file("src/main.rs").line(7));
+        let target = handoff_argv_target(&handoff).expect("file target");
+        assert_eq!(target.path, "src/main.rs");
+        assert_eq!(target.line, Some(7));
+    }
+
+    #[test]
+    fn argv_target_skips_explore_action() {
+        let handoff = NvimHandoff::new("diff", "explore")
+            .target(NvimTarget::directory("/repo"))
+            .target(NvimTarget::file("/repo/src/main.rs"));
+        assert!(handoff_argv_target(&handoff).is_none());
+    }
+
+    #[test]
+    fn argv_target_skips_directory_first_target() {
+        let handoff =
+            NvimHandoff::new("tickets", "worktree").target(NvimTarget::directory("/repo"));
+        assert!(handoff_argv_target(&handoff).is_none());
+    }
+
+    #[test]
+    fn absolutize_joins_relative_against_cwd() {
+        assert_eq!(
+            absolutize("src/main.rs", Some("/repo")),
+            PathBuf::from("/repo/src/main.rs")
+        );
+    }
+
+    #[test]
+    fn absolutize_keeps_absolute_and_handles_missing_cwd() {
+        assert_eq!(
+            absolutize("/abs/main.rs", Some("/repo")),
+            PathBuf::from("/abs/main.rs")
+        );
+        assert_eq!(absolutize("src/main.rs", None), PathBuf::from("src/main.rs"));
+        assert_eq!(absolutize("src/main.rs", Some("")), PathBuf::from("src/main.rs"));
     }
 }
