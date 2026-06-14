@@ -1,6 +1,6 @@
 pub mod ansi;
+pub mod diagram;
 pub mod markdown;
-mod mermaid;
 pub mod nvim;
 pub mod output;
 pub mod skills;

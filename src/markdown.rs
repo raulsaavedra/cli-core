@@ -1311,12 +1311,31 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
                 }
-                if lang == "mermaid" {
-                    if let Some(lines) = crate::mermaid::render_flowchart(code, ctx.viewport_width)
-                    {
-                        out.extend(lines);
-                        out.push(String::new());
-                        continue;
+                if lang == "sketch" {
+                    match crate::diagram::render_json(code) {
+                        Ok(rendered) if rendered.width <= ctx.viewport_width => {
+                            out.extend(rendered.lines);
+                            out.push(String::new());
+                            continue;
+                        }
+                        Ok(rendered) => {
+                            // Too wide for the viewport: an honest placeholder
+                            // beats a truncated diagram.
+                            let title = rendered.title.as_deref().unwrap_or("untitled");
+                            out.push(ansi_dim(&format!(
+                                "◆ sketch `{title}` — {} nodes, {} edges — needs {} cols (viewport {})",
+                                rendered.node_count,
+                                rendered.edge_count,
+                                rendered.width,
+                                ctx.viewport_width,
+                            )));
+                            out.push(String::new());
+                            continue;
+                        }
+                        Err(e) => {
+                            out.push(ansi_256(196, &format!("✗ sketch: {e}")));
+                            // Show the source so the author can fix it.
+                        }
                     }
                 }
                 out.extend(render_code_lines(lang, code));
@@ -1925,7 +1944,7 @@ pub fn render(content: &str, width: usize) -> RenderResult {
 
 /// Render markdown with a separate viewport width for diagram blocks.
 /// `width` controls text wrapping; `viewport_width` is the full terminal width
-/// used for mermaid diagrams that benefit from extra horizontal space.
+/// used for sketch diagrams that benefit from extra horizontal space.
 pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) -> RenderResult {
     let width = width.max(20);
     let viewport_width = viewport_width.max(width);
@@ -1993,6 +2012,39 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sketch_blocks_render_as_diagrams() {
+        let content = "```sketch\n{\"nodes\": [{\"id\": \"a\", \"label\": \"API\"}, {\"id\": \"b\", \"label\": \"DB\", \"kind\": \"store\"}], \"edges\": [{\"from\": \"a\", \"to\": \"b\", \"label\": \"query\"}]}\n```";
+        let result = render_with_viewport(content, 72, 72);
+        let plain = result.plain.join("\n");
+        assert!(plain.contains("API"), "diagram nodes render");
+        assert!(plain.contains("query"), "edge label renders");
+        assert!(plain.contains("▼"), "edge arrow renders");
+        assert!(!plain.contains("nodes"), "raw JSON is not shown");
+    }
+
+    #[test]
+    fn sketch_blocks_too_wide_show_placeholder() {
+        let content = "```sketch\n{\"title\": \"big one\", \"nodes\": [{\"id\": \"a\", \"label\": \"A very long service name in a very wide box\"}, {\"id\": \"b\", \"label\": \"Another very long service name beside it\"}]}\n```";
+        let result = render_with_viewport(content, 30, 30);
+        let plain = result.plain.join("\n");
+        assert!(
+            plain.contains("◆ sketch `big one`"),
+            "placeholder names the diagram instead of truncating it"
+        );
+    }
+
+    #[test]
+    fn sketch_blocks_with_errors_fail_loudly() {
+        let content = "```sketch\n{\"nodes\": [{\"id\": \"a\", \"label\": \"A\"}], \"edges\": [{\"from\": \"a\", \"to\": \"ghost\"}]}\n```";
+        let result = render_with_viewport(content, 72, 72);
+        let plain = result.plain.join("\n");
+        assert!(
+            plain.contains("✗ sketch:") && plain.contains("ghost"),
+            "error names the offending reference"
+        );
+    }
 
     #[test]
     fn rust_code_blocks_are_syntax_highlighted() {
