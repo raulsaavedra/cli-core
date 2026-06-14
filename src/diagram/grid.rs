@@ -22,7 +22,6 @@ pub enum Style {
     BorderStore,
     BorderQueue,
     BorderExternal,
-    BorderNote,
     Label,
     LabelDecision,
     LabelExternal,
@@ -32,7 +31,6 @@ pub enum Style {
     EdgeLineEvent,
     EdgeLabel,
     Arrow,
-    Tether,
     Title,
 }
 
@@ -173,7 +171,6 @@ fn style_code(style: Style) -> &'static str {
         Style::BorderStore => "\x1b[35m",
         Style::BorderQueue => "\x1b[33m",
         Style::BorderExternal => "\x1b[2m",
-        Style::BorderNote => "\x1b[2m",
         Style::Label => "\x1b[1m",
         Style::LabelDecision => "\x1b[1;33m",
         Style::LabelExternal => "\x1b[2;3m",
@@ -183,7 +180,6 @@ fn style_code(style: Style) -> &'static str {
         Style::EdgeLineEvent => "\x1b[33m",
         Style::EdgeLabel => "\x1b[3m",
         Style::Arrow => "\x1b[36m",
-        Style::Tether => "\x1b[2m",
         Style::Title => "\x1b[1;4m",
     }
 }

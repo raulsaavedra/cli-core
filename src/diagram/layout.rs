@@ -15,10 +15,15 @@ use super::doc::{DiagramError, EdgeKind, Model, NodeKind, NoteMark};
 use super::grid::{Style, E, N, S, W};
 
 const GAP_X: usize = 4;
-const TETHER_LEN: usize = 2;
 const RANK_H: usize = 3;
 const MARGIN_X: usize = 1;
 const MARGIN_Y: usize = 0;
+/// An edge spanning at least this many ranks routes down a margin corridor
+/// instead of through the interior, so it can't bisect the dense middle.
+/// Shorter spans still interpolate through the interior (which reads fine).
+const LONG_SPAN: usize = 4;
+/// Columns reserved per corridor lane in a gutter (1 line + 1 gap).
+const CORRIDOR_W: usize = 2;
 
 // ---------------------------------------------------------------------------
 // Scene: what layout hands to paint
@@ -28,7 +33,6 @@ const MARGIN_Y: usize = 0;
 pub enum BorderKind {
     Solid,
     Double,
-    Rounded,
 }
 
 #[derive(Debug)]
@@ -74,21 +78,19 @@ pub struct Scene {
 /// One thing occupying horizontal space in a rank row.
 enum ItemKind {
     Node(usize),
-    Note(usize),
     /// Waypoint for chain `usize` passing through this rank.
     Way(usize),
 }
 
 struct Item {
     kind: ItemKind,
-    width: usize,
     x: usize, // assigned during placement
 }
 
-/// A horizontal slot in a rank row during placement. A node carries its notes
-/// so they stay grouped; waypoints float and are slotted by barycenter.
+/// A horizontal slot in a rank row during placement. Interior waypoints float
+/// and are slotted by barycenter; corridor waypoints live in the gutters.
 enum Cell {
-    Node { node: usize, notes: Vec<usize> },
+    Node(usize),
     Way(usize),
 }
 
@@ -150,17 +152,33 @@ enum LabelPlace {
     Row { x: usize },
 }
 
+/// A long edge routed down a margin gutter rather than the interior.
+struct Corridor {
+    ways: Vec<usize>,
+    s: usize,
+    t: usize,
+    kind: EdgeKind,
+}
+
 // ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
 
 pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
+    // Notes render as footnotes below the diagram; each annotated node carries
+    // a [n] marker keyed to that list, so notes never disturb the graph layout.
+    let mut markers_of: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (ni, note) in model.notes.iter().enumerate() {
+        markers_of.entry(note.on).or_default().push(ni + 1);
+    }
+
     // -- node display geometry ------------------------------------------------
     let mut geoms: Vec<NodeGeom> = model
         .nodes
         .iter()
-        .map(|n| {
-            let (content, border, border_style, content_style) = match n.kind {
+        .enumerate()
+        .map(|(idx, n)| {
+            let (mut content, border, border_style, content_style) = match n.kind {
                 NodeKind::Service => (
                     n.label.clone(),
                     BorderKind::Solid,
@@ -192,6 +210,10 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
                     Style::LabelDecision,
                 ),
             };
+            if let Some(nums) = markers_of.get(&idx) {
+                let list = nums.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                content.push_str(&format!(" [{list}]"));
+            }
             NodeGeom {
                 x: 0,
                 w: content.chars().count() + 4,
@@ -240,26 +262,13 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
     // Place items, route channels, and fit labels. When a label has nowhere to
     // go, the answer is more horizontal room: widen the gaps and re-place.
     // Truncation is never the answer.
-    let mut notes_of: HashMap<usize, Vec<usize>> = HashMap::new();
-    for (ni, note) in model.notes.iter().enumerate() {
-        notes_of.entry(note.on).or_default().push(ni);
-    }
-
     const MAX_ATTEMPTS: usize = 8;
     let mut placed: Option<Placement> = None;
     let mut last_err: Option<DiagramError> = None;
     for attempt in 0..MAX_ATTEMPTS {
         let gap = GAP_X + attempt * 4;
         let extra_canvas = attempt * 8;
-        match place_and_route(
-            model,
-            &mut geoms,
-            &chains,
-            &ways_in_rank,
-            &notes_of,
-            gap,
-            extra_canvas,
-        ) {
+        match place_and_route(model, &mut geoms, &chains, &ways_in_rank, gap, extra_canvas) {
             Ok(p) => {
                 placed = Some(p);
                 break;
@@ -274,6 +283,7 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
         channels,
         lane_heights,
         label_places,
+        corridor_bands,
     } = match placed {
         Some(p) => p,
         None => return Err(last_err.expect("retry loop always records its error")),
@@ -299,8 +309,8 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
             y += h;
         }
     }
-    let height = y + 1;
-    let width = canvas_w + 2 * MARGIN_X;
+    let mut height = y + 1;
+    let mut width = canvas_w + 2 * MARGIN_X;
 
     // -- emit ---------------------------------------------------------------------
     let mut ops: Vec<Op> = Vec::new();
@@ -331,34 +341,6 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
                         content_style: g.content_style,
                     });
                 }
-                ItemKind::Note(ni) => {
-                    let note = &model.notes[ni];
-                    let (content, style) = match note.mark {
-                        NoteMark::Uncertain => {
-                            (format!("? {}", note.text), Style::LabelUncertain)
-                        }
-                        NoteMark::Info => (note.text.clone(), Style::LabelNote),
-                    };
-                    ops.push(Op::Box {
-                        x: item.x,
-                        y: by,
-                        w: item.width,
-                        h: RANK_H,
-                        border: BorderKind::Rounded,
-                        border_style: Style::BorderNote,
-                        content,
-                        content_style: style,
-                    });
-                    // Tether from anchor to note at mid height.
-                    let cells: Vec<(usize, usize, u8)> = (item.x - TETHER_LEN..item.x)
-                        .map(|x| (x, by + 1, E | W))
-                        .collect();
-                    ops.push(Op::Stroke {
-                        cells,
-                        dashed: true,
-                        style: Style::Tether,
-                    });
-                }
                 ItemKind::Way(wid) => {
                     // Pass-through vertical across the rank band, styled like
                     // the edge it belongs to.
@@ -377,6 +359,21 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
                 }
             }
         }
+    }
+
+    // Corridor band pass-throughs: each long edge's vertical across rank bands.
+    for &(rank, x, kind) in &corridor_bands {
+        let by = rank_y[rank];
+        let cells: Vec<(usize, usize, u8)> = (by..by + RANK_H).map(|yy| (x, yy, N | S)).collect();
+        ops.push(Op::Stroke {
+            cells,
+            dashed: matches!(kind, EdgeKind::Async | EdgeKind::Event),
+            style: if kind == EdgeKind::Event {
+                Style::EdgeLineEvent
+            } else {
+                Style::EdgeLine
+            },
+        });
     }
 
     for (cidx, segs) in channels.iter().enumerate() {
@@ -473,6 +470,30 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
         }
     }
 
+    // -- footnotes ------------------------------------------------------------
+    // One line per note, below the diagram: [n] <node> — <text>. Uncertain
+    // notes are flagged and styled. Keeping notes here leaves the graph clean.
+    if !model.notes.is_empty() {
+        let mut fy = height + 1;
+        for (ni, note) in model.notes.iter().enumerate() {
+            let label = &model.nodes[note.on].label;
+            let (prefix, style) = match note.mark {
+                NoteMark::Uncertain => ("? ", Style::LabelUncertain),
+                NoteMark::Info => ("", Style::LabelNote),
+            };
+            let text = format!("[{}] {} — {}{}", ni + 1, label, prefix, note.text);
+            width = width.max(MARGIN_X + text.chars().count() + MARGIN_X);
+            ops.push(Op::Text {
+                x: MARGIN_X,
+                y: fy,
+                text,
+                style,
+            });
+            fy += 1;
+        }
+        height = fy;
+    }
+
     Ok(Scene {
         width,
         height,
@@ -491,6 +512,9 @@ struct Placement {
     /// lane_heights[channel][lane] = 1, or 2 when the lane carries a label row.
     lane_heights: Vec<Vec<usize>>,
     label_places: Vec<HashMap<usize, LabelPlace>>,
+    /// Rank-band pass-throughs for corridor (long, margin-routed) edges:
+    /// (rank, x, edge kind). Drawn by the emit stage, which knows the y rows.
+    corridor_bands: Vec<(usize, usize, EdgeKind)>,
 }
 
 fn place_and_route(
@@ -498,19 +522,9 @@ fn place_and_route(
     geoms: &mut [NodeGeom],
     chains: &[Chain],
     ways_in_rank: &[Vec<usize>],
-    notes_of: &HashMap<usize, Vec<usize>>,
     gap: usize,
     extra_canvas: usize,
 ) -> Result<Placement, DiagramError> {
-    let note_w: Vec<usize> = model
-        .notes
-        .iter()
-        .map(|n| {
-            let prefix = if n.mark == NoteMark::Uncertain { 2 } else { 0 };
-            n.text.chars().count() + prefix + 4
-        })
-        .collect();
-
     let way_count: usize = ways_in_rank.iter().map(|w| w.len()).sum();
 
     // For each waypoint: the chain's true end nodes and where it sits between
@@ -530,29 +544,57 @@ fn place_and_route(
         }
     }
 
-    // Rank rows as ordered cells: a node carries its notes; waypoints float.
+    // Long edges (spanning >= LONG_SPAN ranks) route down margin gutters, so
+    // they're pulled out of the rank rows entirely — they take no interior
+    // space and get a fixed corridor column instead.
+    let mut is_corridor_way = vec![false; way_count];
+    let mut corridors: Vec<Corridor> = Vec::new();
+    for chain in chains {
+        if chain.ends.len() < LONG_SPAN + 1 {
+            continue;
+        }
+        let l = chain.ends.len();
+        let (End::Node(s), End::Node(t)) = (chain.ends[0], chain.ends[l - 1]) else {
+            continue;
+        };
+        let ways: Vec<usize> = chain
+            .ends
+            .iter()
+            .filter_map(|e| if let End::Way(w) = e { Some(*w) } else { None })
+            .collect();
+        for &w in &ways {
+            is_corridor_way[w] = true;
+        }
+        corridors.push(Corridor {
+            ways,
+            s,
+            t,
+            kind: model.edges[chain.edge].kind,
+        });
+    }
+
+    // Rank rows as ordered cells: nodes in author order, interior waypoints
+    // floating (corridor waypoints are excluded — they live in the gutters).
     let mut orders: Vec<Vec<Cell>> = model
         .ranks
         .iter()
         .enumerate()
         .map(|(r, row)| {
-            let mut cells: Vec<Cell> = row
-                .iter()
-                .map(|&node| Cell::Node {
-                    node,
-                    notes: notes_of.get(&node).cloned().unwrap_or_default(),
-                })
-                .collect();
-            cells.extend(ways_in_rank[r].iter().map(|&w| Cell::Way(w)));
+            let mut cells: Vec<Cell> = row.iter().map(|&node| Cell::Node(node)).collect();
+            cells.extend(
+                ways_in_rank[r]
+                    .iter()
+                    .filter(|&&w| !is_corridor_way[w])
+                    .map(|&w| Cell::Way(w)),
+            );
             cells
         })
         .collect();
 
     let mut way_x = vec![0usize; way_count];
-    let mut note_x = vec![0usize; model.notes.len()];
 
     // extra_canvas grows on retry so labels in narrow diagrams get room.
-    let mut canvas_w = place_rows(&orders, geoms, &mut way_x, &mut note_x, &note_w, gap, extra_canvas);
+    let mut canvas_w = place_rows(&orders, geoms, &mut way_x, gap, extra_canvas);
 
     // Relax: slot each waypoint toward its interpolated target so a long edge
     // drops through the interior instead of detouring around the edge. Sorting
@@ -564,14 +606,73 @@ fn place_and_route(
     for _ in 0..4 {
         for cells in &mut orders {
             cells.sort_by_key(|c| match *c {
-                Cell::Node { node, .. } => center(node, geoms),
+                Cell::Node(node) => center(node, geoms),
                 Cell::Way(w) => {
                     let (s, t, i, l) = way_anchor[w];
                     (center(s, geoms) * (l - 1 - i) + center(t, geoms) * i) / (l - 1)
                 }
             });
         }
-        canvas_w = place_rows(&orders, geoms, &mut way_x, &mut note_x, &note_w, gap, extra_canvas);
+        canvas_w = place_rows(&orders, geoms, &mut way_x, gap, extra_canvas);
+    }
+
+    // -- corridor routing for long edges --------------------------------------
+    // Assign each corridor to the gutter nearest its endpoints, shift the
+    // centered node block past the left gutter, and pin every corridor
+    // waypoint to a fixed column so the edge drops as one clean vertical.
+    let block_w = canvas_w;
+    let block_center = MARGIN_X + block_w / 2;
+    let mid_of = |c: &Corridor, geoms: &[NodeGeom]| -> usize {
+        (center(c.s, geoms) + center(c.t, geoms)) / 2
+    };
+    let mut sided: Vec<usize> = (0..corridors.len()).collect();
+    sided.sort_by_key(|&i| mid_of(&corridors[i], geoms));
+    let mut left: Vec<usize> = Vec::new();
+    let mut right: Vec<usize> = Vec::new();
+    for i in sided {
+        if mid_of(&corridors[i], geoms) <= block_center {
+            left.push(i);
+        } else {
+            right.push(i);
+        }
+    }
+    let left_gutter_w = if left.is_empty() { 0 } else { left.len() * CORRIDOR_W + 1 };
+    let right_gutter_w = if right.is_empty() { 0 } else { right.len() * CORRIDOR_W + 1 };
+
+    if left_gutter_w > 0 {
+        for g in geoms.iter_mut() {
+            g.x += left_gutter_w;
+        }
+        for (w, x) in way_x.iter_mut().enumerate() {
+            if !is_corridor_way[w] {
+                *x += left_gutter_w;
+            }
+        }
+    }
+
+    for (lane, &ci) in left.iter().enumerate() {
+        let cx = MARGIN_X + 1 + lane * CORRIDOR_W;
+        for &w in &corridors[ci].ways {
+            way_x[w] = cx;
+        }
+    }
+    for (lane, &ci) in right.iter().enumerate() {
+        let cx = MARGIN_X + left_gutter_w + block_w + 1 + lane * CORRIDOR_W;
+        for &w in &corridors[ci].ways {
+            way_x[w] = cx;
+        }
+    }
+
+    let canvas_w = left_gutter_w + block_w + right_gutter_w;
+
+    // Rank-band pass-throughs for corridor edges (channels are handled by the
+    // segment router). A waypoint at chain index i sits in rank source_rank + i.
+    let mut corridor_bands: Vec<(usize, usize, EdgeKind)> = Vec::new();
+    for c in &corridors {
+        for &w in &c.ways {
+            let (s, _, i, _) = way_anchor[w];
+            corridor_bands.push((model.nodes[s].rank + i, way_x[w], c.kind));
+        }
     }
 
     // Flatten to the item list the emit stage walks.
@@ -581,22 +682,11 @@ fn place_and_route(
             let mut items = Vec::new();
             for c in cells {
                 match c {
-                    Cell::Node { node, notes } => {
-                        items.push(Item {
-                            width: geoms[*node].w,
-                            kind: ItemKind::Node(*node),
-                            x: geoms[*node].x,
-                        });
-                        for &ni in notes {
-                            items.push(Item {
-                                width: note_w[ni],
-                                kind: ItemKind::Note(ni),
-                                x: note_x[ni],
-                            });
-                        }
-                    }
+                    Cell::Node(node) => items.push(Item {
+                        kind: ItemKind::Node(*node),
+                        x: geoms[*node].x,
+                    }),
                     Cell::Way(w) => items.push(Item {
-                        width: 1,
                         kind: ItemKind::Way(*w),
                         x: way_x[*w],
                     }),
@@ -702,18 +792,17 @@ fn place_and_route(
         channels,
         lane_heights,
         label_places,
+        corridor_bands,
     })
 }
 
-/// Assign x to every node, note, and waypoint for the given cell ordering.
+/// Assign x to every node and interior waypoint for the given cell ordering.
 /// Rows are centered against the widest row (plus `extra_canvas`). Returns the
 /// canvas width. Pure aside from writing the position slices.
 fn place_rows(
     orders: &[Vec<Cell>],
     geoms: &mut [NodeGeom],
     way_x: &mut [usize],
-    note_x: &mut [usize],
-    note_w: &[usize],
     gap: usize,
     extra_canvas: usize,
 ) -> usize {
@@ -724,12 +813,7 @@ fn place_rows(
                 w += gap;
             }
             match c {
-                Cell::Node { node, notes } => {
-                    w += geoms[*node].w;
-                    for &ni in notes {
-                        w += TETHER_LEN + note_w[ni];
-                    }
-                }
+                Cell::Node(node) => w += geoms[*node].w,
                 Cell::Way(_) => w += 1,
             }
         }
@@ -751,14 +835,9 @@ fn place_rows(
                 x += gap;
             }
             match c {
-                Cell::Node { node, notes } => {
+                Cell::Node(node) => {
                     geoms[*node].x = x;
                     x += geoms[*node].w;
-                    for &ni in notes {
-                        x += TETHER_LEN;
-                        note_x[ni] = x;
-                        x += note_w[ni];
-                    }
                 }
                 Cell::Way(w) => {
                     way_x[*w] = x;

@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn notes_render_with_marks() {
+    fn notes_render_as_footnotes() {
         let text = render_plain(
             r#"{
               "nodes": [
@@ -188,9 +188,14 @@ mod tests {
               ]
             }"#,
         );
-        assert_eq!(count(&text, "? fan-out consumer TBD"), 1);
-        assert_eq!(count(&text, "idempotent"), 1);
-        assert!(text.contains("╭"), "notes use rounded borders");
+        // Annotated nodes carry a marker keyed to the footnote list.
+        assert!(text.contains("SNS topic [1]"), "node shows its marker");
+        assert!(text.contains("Worker [2]"));
+        // Notes live below the diagram as footnotes, not inline boxes.
+        assert!(text.contains("[1] SNS topic — ? fan-out consumer TBD"));
+        assert!(text.contains("[2] Worker — idempotent"));
+        // No rounded note boxes in the graph any more.
+        assert!(!text.contains("╭"), "notes no longer render as inline boxes");
     }
 
     #[test]

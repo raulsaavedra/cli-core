@@ -61,7 +61,6 @@ fn draw_box(
     let (tl, tr, bl, br, hor, ver) = match border {
         BorderKind::Solid => ('┌', '┐', '└', '┘', '─', '│'),
         BorderKind::Double => ('╔', '╗', '╚', '╝', '═', '║'),
-        BorderKind::Rounded => ('╭', '╮', '╰', '╯', '─', '│'),
     };
     let _ = (N, E, S, W); // box borders are owned glyphs, never composed strokes
 
