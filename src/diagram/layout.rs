@@ -477,18 +477,37 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
         let mut fy = height + 1;
         for (ni, note) in model.notes.iter().enumerate() {
             let label = &model.nodes[note.on].label;
-            let (prefix, style) = match note.mark {
+            let (prefix, body_style) = match note.mark {
                 NoteMark::Uncertain => ("? ", Style::LabelUncertain),
                 NoteMark::Info => ("", Style::LabelNote),
             };
-            let text = format!("[{}] {} — {}{}", ni + 1, label, prefix, note.text);
-            width = width.max(MARGIN_X + text.chars().count() + MARGIN_X);
+            // Three tiers so a reader maps marker -> node at a glance: the [n]
+            // anchor (accent), the node name (bold, as in its box), then the
+            // note body (dim, or flagged when uncertain).
+            let marker = format!("[{}]", ni + 1);
+            let body = format!("— {prefix}{}", note.text);
+            let mut x = MARGIN_X;
             ops.push(Op::Text {
-                x: MARGIN_X,
+                x,
                 y: fy,
-                text,
-                style,
+                text: marker.clone(),
+                style: Style::NoteMarker,
             });
+            x += marker.chars().count() + 1;
+            ops.push(Op::Text {
+                x,
+                y: fy,
+                text: label.clone(),
+                style: Style::Label,
+            });
+            x += label.chars().count() + 1;
+            ops.push(Op::Text {
+                x,
+                y: fy,
+                text: body.clone(),
+                style: body_style,
+            });
+            width = width.max(x + body.chars().count() + MARGIN_X);
             fy += 1;
         }
         height = fy;
