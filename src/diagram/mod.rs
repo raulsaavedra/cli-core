@@ -259,6 +259,17 @@ mod tests {
         assert_eq!(count(&text, "▼"), 8, "every edge lands exactly one arrow");
     }
 
+    #[test]
+    fn doc_example_renders() {
+        // The authoring doc's example must always render, or the doc lies.
+        let doc = include_str!("../../docs/sketch.md");
+        let marker = "```sketch\n";
+        let start = doc.find(marker).expect("docs/sketch.md has a sketch example");
+        let body = &doc[start + marker.len()..];
+        let end = body.find("```").expect("sketch fence closes");
+        render_json(&body[..end]).expect("docs/sketch.md example must render");
+    }
+
     // -- loud failures ------------------------------------------------------
 
     #[test]

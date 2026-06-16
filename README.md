@@ -9,6 +9,7 @@ Shared Rust crate for building local and agent-friendly CLIs.
 - `sqlite` — open local SQLite databases with sensible defaults for CLI workloads
 - `stdio` — read piped stdin content
 - `markdown` — render Markdown in the terminal and extract plain-text metadata
+- `diagram` — render architecture and flow diagrams from `sketch` JSON fenced blocks
 - `ansi` — parse ANSI-styled strings into ratatui `Span` objects for TUI rendering
 - `nvim` — launch Neovim with structured handoff payloads and detect quit-to-terminal cwd handoff requests
 
@@ -106,6 +107,14 @@ Terminal Markdown rendering with extracted metadata for downstream navigation an
 - `plain: Vec<String>` — plain-text lines with ANSI stripped and trailing spaces trimmed
 - `headings: Vec<Heading>` — heading metadata with `level`, `text`, and zero-based `line` index
 - `links: Vec<Link>` — extracted links with `text` and `href`
+
+### `diagram`
+
+Terminal-native architecture diagrams. A fenced `sketch` JSON block describes typed nodes, edges, and notes; the engine lays them out on a character grid and paints once. The `markdown` module renders these fences inline, so any cli-core markdown consumer draws them for free.
+
+- `render_json(src: &str) -> Result<Rendered, DiagramError>` — render a sketch document to ANSI lines at its natural width
+
+See [`docs/sketch.md`](docs/sketch.md) for the authoring format. The parser in `src/diagram/doc.rs` is the canonical schema.
 
 ### `ansi`
 
