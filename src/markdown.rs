@@ -1312,21 +1312,23 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     out.push(String::new());
                 }
                 if lang == "sketch" {
-                    match crate::diagram::render_json(code) {
-                        Ok(rendered) if rendered.width <= ctx.viewport_width => {
+                    match crate::diagram::render_json_in(code, ctx.viewport_width) {
+                        Ok(rendered) if rendered.graph_width <= ctx.viewport_width => {
                             out.extend(rendered.lines);
                             out.push(String::new());
                             continue;
                         }
                         Ok(rendered) => {
-                            // Too wide for the viewport: an honest placeholder
-                            // beats a truncated diagram.
+                            // The graph itself is too wide for the viewport: an
+                            // honest placeholder beats a truncated diagram.
+                            // Footnotes wrap, so only the node/edge extent
+                            // (graph_width) can trip this — never a long note.
                             let title = rendered.title.as_deref().unwrap_or("untitled");
                             out.push(ansi_dim(&format!(
                                 "◆ sketch `{title}` — {} nodes, {} edges — needs {} cols (viewport {})",
                                 rendered.node_count,
                                 rendered.edge_count,
-                                rendered.width,
+                                rendered.graph_width,
                                 ctx.viewport_width,
                             )));
                             out.push(String::new());
@@ -2034,6 +2036,30 @@ mod tests {
             "placeholder names the diagram instead of truncating it"
         );
     }
+
+    #[test]
+    fn long_footnote_wraps_instead_of_suppressing_diagram() {
+        // A tiny graph whose footnote, on one line, is far wider than the
+        // viewport. The graph fits, so it must render with the note wrapped —
+        // not collapse to a placeholder because of the note's width.
+        let content = "```sketch\n{\"title\": \"tiny graph\", \"nodes\": [{\"id\": \"a\", \"label\": \"A\"}, {\"id\": \"b\", \"label\": \"B\"}], \"edges\": [{\"from\": \"a\", \"to\": \"b\"}], \"notes\": [{\"on\": \"a\", \"text\": \"this is a deliberately long footnote that on a single line would be far wider than the viewport and used to drag the whole diagram past the fit check even though the graph itself is tiny\"}]}\n```";
+        let result = render_with_viewport(content, 120, 120);
+        let plain = result.plain.join("\n");
+        assert!(
+            !plain.contains("◆ sketch"),
+            "a tiny graph must render even with a long footnote"
+        );
+        assert!(plain.contains("[1] A —"), "footnote anchor renders");
+        assert!(plain.contains("deliberately"), "footnote text is present");
+        // The footnote wraps to the caption width (the readable floor for a tiny
+        // diagram), not the full viewport — so it never sprawls edge-to-edge.
+        let max = result.plain.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(
+            max <= 60,
+            "footnote wraps to caption width (~56), not the 120-col viewport (got {max})"
+        );
+    }
+
 
     #[test]
     fn sketch_blocks_with_errors_fail_loudly() {

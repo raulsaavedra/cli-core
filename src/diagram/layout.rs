@@ -17,6 +17,12 @@ use super::grid::{Style, E, N, S, W};
 const GAP_X: usize = 4;
 const RANK_H: usize = 3;
 const MARGIN_X: usize = 1;
+/// Minimum text columns a footnote keeps even under a deep indent, so a long
+/// node label can't crush its note into a one-word-per-line sliver.
+const MIN_TEXT_COLS: usize = 24;
+/// Smallest caption width for the footnote block, so footnotes under a tiny
+/// diagram still read as a paragraph rather than a narrow ribbon.
+const MIN_FOOTNOTE_WIDTH: usize = 56;
 const MARGIN_Y: usize = 0;
 /// An edge spanning at least this many ranks routes down a margin corridor
 /// instead of through the interior, so it can't bisect the dense middle.
@@ -67,6 +73,9 @@ pub enum Op {
 #[derive(Debug)]
 pub struct Scene {
     pub width: usize,
+    /// Width of the graph alone (nodes + edges), before footnotes. Footnotes
+    /// wrap, so this — not `width` — is what decides whether the diagram fits.
+    pub graph_width: usize,
     pub height: usize,
     pub ops: Vec<Op>,
 }
@@ -164,7 +173,7 @@ struct Corridor {
 // Entry
 // ---------------------------------------------------------------------------
 
-pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
+pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
     // Notes render as footnotes below the diagram; each annotated node carries
     // a [n] marker keyed to that list, so notes never disturb the graph layout.
     let mut markers_of: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -470,10 +479,21 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
         }
     }
 
+    // The graph's natural width is settled here, before footnotes. Footnotes
+    // are wrapped prose: they must never decide whether the graph fits its
+    // viewport, so the renderer reports this width separately from the
+    // footnote-extended one.
+    let graph_width = width;
+
     // -- footnotes ------------------------------------------------------------
-    // One line per note, below the diagram: [n] <node> — <text>. Uncertain
-    // notes are flagged and styled. Keeping notes here leaves the graph clean.
+    // One "[n] <node> — <text>" entry per note, below the diagram, as a
+    // hanging-indent paragraph: the [n] marker sits in the left gutter, the node
+    // name and body open at a fixed column, and every wrapped line aligns under
+    // the node name (never under each note's text, which would leave the block's
+    // left edge ragged). The block wraps to the graph's own width — a caption
+    // beside the diagram, not an edge-to-edge sprawl — capped at the viewport.
     if !model.notes.is_empty() {
+        let block_w = graph_width.clamp(MIN_FOOTNOTE_WIDTH.min(viewport.max(1)), viewport.max(1));
         let mut fy = height + 1;
         for (ni, note) in model.notes.iter().enumerate() {
             let label = &model.nodes[note.on].label;
@@ -485,39 +505,115 @@ pub fn compute(model: &Model) -> Result<Scene, DiagramError> {
             // anchor (accent), the node name (bold, as in its box), then the
             // note body (dim, or flagged when uncertain).
             let marker = format!("[{}]", ni + 1);
-            let body = format!("— {prefix}{}", note.text);
-            let mut x = MARGIN_X;
+            let node_x = MARGIN_X + marker.chars().count() + 1;
+            let lead = format!("— {prefix}");
+            let body_x = node_x + label.chars().count() + 1;
+            let first_body_x = body_x + lead.chars().count();
+
             ops.push(Op::Text {
-                x,
+                x: MARGIN_X,
                 y: fy,
-                text: marker.clone(),
+                text: marker,
                 style: Style::NoteMarker,
             });
-            x += marker.chars().count() + 1;
             ops.push(Op::Text {
-                x,
+                x: node_x,
                 y: fy,
                 text: label.clone(),
                 style: Style::Label,
             });
-            x += label.chars().count() + 1;
-            ops.push(Op::Text {
-                x,
-                y: fy,
-                text: body.clone(),
-                style: body_style,
-            });
-            width = width.max(x + body.chars().count() + MARGIN_X);
-            fy += 1;
+
+            // The first line takes what's left after the node name; wrapped
+            // lines (aligned under the node name) take the fuller width, so a
+            // long symbol wraps whole instead of being hyphen-split mid-word.
+            let first_avail = footnote_text_cols(block_w, viewport, first_body_x);
+            let cont_avail = footnote_text_cols(block_w, viewport, node_x);
+            for (li, chunk) in wrap_hanging(&note.text, first_avail, cont_avail)
+                .iter()
+                .enumerate()
+            {
+                let (cx, text) = if li == 0 {
+                    (body_x, format!("{lead}{chunk}"))
+                } else {
+                    (node_x, chunk.clone())
+                };
+                width = width.max(cx + text.chars().count() + MARGIN_X);
+                ops.push(Op::Text {
+                    x: cx,
+                    y: fy,
+                    text,
+                    style: body_style,
+                });
+                fy += 1;
+            }
         }
         height = fy;
     }
 
     Ok(Scene {
         width,
+        graph_width,
         height,
         ops,
     })
+}
+
+/// Text columns available to a footnote line starting at `start_x`: aim for the
+/// caption `block_w`, never exceed the `viewport` (hard cap), and keep at least
+/// `MIN_TEXT_COLS` when there is room so a deep indent still leaves usable space.
+fn footnote_text_cols(block_w: usize, viewport: usize, start_x: usize) -> usize {
+    let cap = viewport.saturating_sub(start_x + MARGIN_X).max(1);
+    let want = block_w.saturating_sub(start_x + MARGIN_X);
+    want.max(MIN_TEXT_COLS.min(cap)).min(cap)
+}
+
+/// Wrap prose for a hanging-indent paragraph: the first line has `first` columns,
+/// every wrapped line after it has `rest`. Words break on whitespace, hard-split
+/// only when a single word is wider than its line. Always returns >= 1 line.
+fn wrap_hanging(text: &str, first: usize, rest: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0;
+    let avail = |line_idx: usize| if line_idx == 0 { first.max(1) } else { rest.max(1) };
+    for word in text.split_whitespace() {
+        let ww = word.chars().count();
+        let w = avail(lines.len());
+        if ww > w {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            let chars: Vec<char> = word.chars().collect();
+            let mut i = 0;
+            while i < chars.len() {
+                let lw = avail(lines.len());
+                let end = (i + lw).min(chars.len());
+                lines.push(chars[i..end].iter().collect());
+                i = end;
+            }
+            continue;
+        }
+        let needs = if cur.is_empty() { ww } else { cur_w + 1 + ww };
+        if needs > w && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+            cur_w = ww;
+        } else {
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += 1;
+            }
+            cur.push_str(word);
+            cur_w += ww;
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 // ---------------------------------------------------------------------------

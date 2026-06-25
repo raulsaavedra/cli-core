@@ -18,6 +18,10 @@ pub use doc::DiagramError;
 pub struct Rendered {
     pub lines: Vec<String>,
     pub width: usize,
+    /// Width of the graph alone (nodes + edges). Footnotes wrap to the viewport,
+    /// so this is what a caller should test against the viewport — not `width`,
+    /// which includes the (already wrapped) footnote lines.
+    pub graph_width: usize,
     pub title: Option<String>,
     /// Ticket reference carried by the document (e.g. "AUTH-42").
     pub ticket: Option<String>,
@@ -29,13 +33,26 @@ pub struct Rendered {
 /// The caller decides what to do when the diagram is wider than its viewport
 /// (the markdown renderer shows an honest placeholder instead of truncating).
 pub fn render_json(src: &str) -> Result<Rendered, DiagramError> {
+    render_at(src, usize::MAX)
+}
+
+/// Render with a known viewport so footnote prose wraps to fit instead of
+/// widening the diagram. The graph still lays out at its natural width; a caller
+/// deciding whether the diagram fits should test `graph_width`, not `width`
+/// (which includes the wrapped footnotes).
+pub fn render_json_in(src: &str, viewport: usize) -> Result<Rendered, DiagramError> {
+    render_at(src, viewport)
+}
+
+fn render_at(src: &str, viewport: usize) -> Result<Rendered, DiagramError> {
     let doc = doc::parse(src)?;
     let model = doc::resolve(doc)?;
-    let scene = layout::compute(&model)?;
+    let scene = layout::compute(&model, viewport)?;
     let grid = paint::paint(&scene);
     Ok(Rendered {
         lines: grid.to_ansi_lines(),
         width: scene.width,
+        graph_width: scene.graph_width,
         title: model.title.clone(),
         ticket: model.ticket.clone(),
         node_count: model.nodes.len(),
