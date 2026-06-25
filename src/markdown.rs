@@ -28,6 +28,16 @@ pub struct Link {
     pub href: String,
 }
 
+/// A file reference (`@file:path[:line[:col]]`) extracted from the markdown and
+/// rendered as a jump-to-editor chip. Interactive viewers open it in an editor.
+#[derive(Debug, Clone)]
+pub struct FileRef {
+    /// Path as authored after `@file:`; may be absolute or relative.
+    pub path: String,
+    pub line: Option<usize>,
+    pub col: Option<usize>,
+}
+
 /// Result of rendering markdown for terminal display.
 #[derive(Debug, Clone)]
 pub struct RenderResult {
@@ -39,6 +49,7 @@ pub struct RenderResult {
     pub plain: Vec<String>,
     pub headings: Vec<Heading>,
     pub links: Vec<Link>,
+    pub file_refs: Vec<FileRef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +268,13 @@ fn render_code_lines(lang: &str, code: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// Render inline markdown to ANSI-styled text. Also collects links.
-fn render_inline(text: &str, links: &mut Vec<Link>, seen_links: &mut HashSet<String>) -> String {
+fn render_inline(
+    text: &str,
+    links: &mut Vec<Link>,
+    seen_links: &mut HashSet<String>,
+    file_refs: &mut Vec<FileRef>,
+    seen_file_refs: &mut HashSet<String>,
+) -> String {
     let mut text = text.to_string();
 
     // 1. Protect code spans — replace with placeholders, render after.
@@ -267,6 +284,10 @@ fn render_inline(text: &str, links: &mut Vec<Link>, seen_links: &mut HashSet<Str
         code_spans.push(ansi_cyan(caps[1]));
         format!("\x00CS{idx}\x00")
     });
+
+    // 1b. Protect file refs (@file:path[:line[:col]]) as jump-to-editor chips.
+    let mut file_chips: Vec<String> = Vec::new();
+    text = replace_file_refs(&text, file_refs, seen_file_refs, &mut file_chips);
 
     // 2. Links: [text](url)
     text = regex_replace_all_with_links(&text, links, seen_links);
@@ -304,7 +325,103 @@ fn render_inline(text: &str, links: &mut Vec<Link>, seen_links: &mut HashSet<Str
         text = text.replace(&placeholder, span);
     }
 
+    // Restore file-ref chips.
+    for (i, chip) in file_chips.iter().enumerate() {
+        let placeholder = format!("\x00FR{i}\x00");
+        text = text.replace(&placeholder, chip);
+    }
+
     text
+}
+
+/// Scan for `@file:path[:line[:col]]` tokens: collect deduped FileRefs and
+/// replace each occurrence with a placeholder whose styled chip is pushed to
+/// `chips`. Every occurrence is styled; only new targets are collected.
+fn replace_file_refs(
+    text: &str,
+    file_refs: &mut Vec<FileRef>,
+    seen_file_refs: &mut HashSet<String>,
+    chips: &mut Vec<String>,
+) -> String {
+    const MARKER: &str = "@file:";
+    let mut result = String::new();
+    let mut remaining = text;
+    while let Some(pos) = remaining.find(MARKER) {
+        result.push_str(&remaining[..pos]);
+        let after = &remaining[pos + MARKER.len()..];
+        let body_end = after.find(char::is_whitespace).unwrap_or(after.len());
+        let body = &after[..body_end];
+        match parse_file_ref(body) {
+            Some(file_ref) => {
+                let key = format!("{}|{:?}|{:?}", file_ref.path, file_ref.line, file_ref.col);
+                let chip = file_ref_chip(&file_ref);
+                if seen_file_refs.insert(key) {
+                    file_refs.push(file_ref);
+                }
+                let idx = chips.len();
+                chips.push(chip);
+                result.push_str(&format!("\x00FR{idx}\x00"));
+            }
+            None => {
+                result.push_str(MARKER);
+                result.push_str(body);
+            }
+        }
+        remaining = &after[body_end..];
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Parse a `@file:` token body. Trailing numeric `:line` and `:line:col`
+/// segments are split off; the remainder is the path. None if the body is empty.
+fn parse_file_ref(body: &str) -> Option<FileRef> {
+    if body.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = body.split(':').collect();
+    let is_num = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let n = parts.len();
+    if n >= 3 && is_num(parts[n - 1]) && is_num(parts[n - 2]) {
+        let path = parts[..n - 2].join(":");
+        if !path.is_empty() {
+            return Some(FileRef {
+                path,
+                line: parts[n - 2].parse().ok(),
+                col: parts[n - 1].parse().ok(),
+            });
+        }
+    }
+    if n >= 2 && is_num(parts[n - 1]) {
+        let path = parts[..n - 1].join(":");
+        if !path.is_empty() {
+            return Some(FileRef {
+                path,
+                line: parts[n - 1].parse().ok(),
+                col: None,
+            });
+        }
+    }
+    Some(FileRef {
+        path: body.to_string(),
+        line: None,
+        col: None,
+    })
+}
+
+/// Styled inline chip for a file ref: a green, bold, underlined `↪path:line`.
+fn file_ref_chip(file_ref: &FileRef) -> String {
+    let mut label = String::from("↪");
+    label.push_str(&file_ref.path);
+    if let Some(line) = file_ref.line {
+        label.push(':');
+        label.push_str(&line.to_string());
+        if let Some(col) = file_ref.col {
+            label.push(':');
+            label.push_str(&col.to_string());
+        }
+    }
+    ansi_bold_underline_256(76, &label)
 }
 
 /// A simple regex replacement function using a manual approach to avoid
@@ -1221,6 +1338,8 @@ struct RenderContext {
     viewport_width: usize,
     links: Vec<Link>,
     seen_links: HashSet<String>,
+    file_refs: Vec<FileRef>,
+    seen_file_refs: HashSet<String>,
     headings: Vec<Heading>,
 }
 
@@ -1252,7 +1371,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
                 }
-                let styled = render_inline(text, &mut ctx.links, &mut ctx.seen_links);
+                let styled = render_inline(text, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs);
                 let wrapped = wrap_line(&styled, ctx.width, "");
                 out.extend(wrapped);
             }
@@ -1270,7 +1389,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                         (format!("{} ", ansi_dim("\u{2022}")), 2) // "• "
                     };
                     let hang_indent = " ".repeat(bullet_plain_width);
-                    let styled = render_inline(item, &mut ctx.links, &mut ctx.seen_links);
+                    let styled = render_inline(item, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs);
                     let item_width = ctx.width.saturating_sub(bullet_plain_width);
                     let effective_width = if item_width > 10 {
                         item_width
@@ -1297,7 +1416,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     if bq_line.trim().is_empty() {
                         out.push(bar.clone());
                     } else {
-                        let styled = render_inline(bq_line, &mut ctx.links, &mut ctx.seen_links);
+                        let styled = render_inline(bq_line, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs);
                         let effective_width = if bq_width > 10 { bq_width } else { ctx.width };
                         let wrapped = wrap_line(&styled, effective_width, "");
                         for w in &wrapped {
@@ -1373,7 +1492,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     // Pre-render all cells through render_inline so we can measure VISIBLE width
     let rendered_headers: Vec<String> = headers
         .iter()
-        .map(|h| render_inline(h, &mut ctx.links, &mut ctx.seen_links))
+        .map(|h| render_inline(h, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs))
         .collect();
     let rendered_rows: Vec<Vec<String>> = rows
         .iter()
@@ -1381,7 +1500,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
             (0..num_cols)
                 .map(|c| {
                     let text = row.get(c).map(|s| s.as_str()).unwrap_or("");
-                    render_inline(text, &mut ctx.links, &mut ctx.seen_links)
+                    render_inline(text, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs)
                 })
                 .collect()
         })
@@ -1961,6 +2080,8 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         viewport_width,
         links: Vec::new(),
         seen_links: HashSet::new(),
+        file_refs: Vec::new(),
+        seen_file_refs: HashSet::new(),
         headings: Vec::new(),
     };
 
@@ -2008,6 +2129,7 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         plain,
         headings: ctx.headings,
         links: all_links,
+        file_refs: ctx.file_refs,
     }
 }
 
@@ -2119,6 +2241,40 @@ mod tests {
             !result.rendered.contains("\x1b[2mplain text\x1b[22m"),
             "expected text code block to render without muted styling"
         );
+    }
+
+    #[test]
+    fn file_refs_are_extracted_and_styled() {
+        let result = render("See @file:src/store.rs:1290 for the bug.", 80);
+        assert_eq!(result.file_refs.len(), 1);
+        assert_eq!(result.file_refs[0].path, "src/store.rs");
+        assert_eq!(result.file_refs[0].line, Some(1290));
+        assert_eq!(result.file_refs[0].col, None);
+        let plain = result.plain.join("\n");
+        assert!(plain.contains("↪src/store.rs:1290"), "chip rendered: {plain}");
+        assert!(!plain.contains("@file:"), "raw token consumed: {plain}");
+    }
+
+    #[test]
+    fn file_refs_dedupe_and_support_absolute_path_and_col() {
+        let content = "@file:/abs/a.rs:12:5 then again @file:/abs/a.rs:12:5 and @file:rel/b.rs";
+        let result = render(content, 120);
+        assert_eq!(result.file_refs.len(), 2);
+        assert_eq!(result.file_refs[0].path, "/abs/a.rs");
+        assert_eq!(result.file_refs[0].line, Some(12));
+        assert_eq!(result.file_refs[0].col, Some(5));
+        assert_eq!(result.file_refs[1].path, "rel/b.rs");
+        assert_eq!(result.file_refs[1].line, None);
+    }
+
+    #[test]
+    fn file_refs_inside_code_spans_stay_literal() {
+        let result = render("inline `@file:src/x.rs:1` code", 80);
+        assert!(result.file_refs.is_empty());
+        assert!(result
+            .plain
+            .iter()
+            .any(|line| line.contains("@file:src/x.rs:1")));
     }
 
     #[test]
