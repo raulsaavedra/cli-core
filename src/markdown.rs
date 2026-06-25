@@ -28,14 +28,37 @@ pub struct Link {
     pub href: String,
 }
 
-/// A file reference (`@file:path[:line[:col]]`) extracted from the markdown and
-/// rendered as a jump-to-editor chip. Interactive viewers open it in an editor.
+/// A file reference extracted from the markdown and rendered as a
+/// jump-to-editor chip. Authored as `@file:path[:line[:col]]` (bare) or
+/// `@file[label](path[:line[:col]])` (labeled). Interactive viewers open it.
 #[derive(Debug, Clone)]
 pub struct FileRef {
-    /// Path as authored after `@file:`; may be absolute or relative.
+    /// Path as authored; may be absolute or relative.
     pub path: String,
     pub line: Option<usize>,
     pub col: Option<usize>,
+    /// Explicit display label from the `@file[label](...)` form.
+    pub label: Option<String>,
+}
+
+impl FileRef {
+    /// Display text for chips and pickers: the explicit label, else the file
+    /// basename with `:line` when present.
+    pub fn display(&self) -> String {
+        if let Some(label) = &self.label {
+            return label.clone();
+        }
+        let base = self
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.path);
+        match self.line {
+            Some(line) => format!("{base}:{line}"),
+            None => base.to_string(),
+        }
+    }
 }
 
 /// Result of rendering markdown for terminal display.
@@ -334,8 +357,9 @@ fn render_inline(
     text
 }
 
-/// Scan for `@file:path[:line[:col]]` tokens: collect deduped FileRefs and
-/// replace each occurrence with a placeholder whose styled chip is pushed to
+/// Scan for `@file` references — `@file:path[:line[:col]]` (bare) or
+/// `@file[label](path[:line[:col]])` (labeled) — collecting deduped FileRefs and
+/// replacing each occurrence with a placeholder whose styled chip is pushed to
 /// `chips`. Every occurrence is styled; only new targets are collected.
 fn replace_file_refs(
     text: &str,
@@ -343,16 +367,14 @@ fn replace_file_refs(
     seen_file_refs: &mut HashSet<String>,
     chips: &mut Vec<String>,
 ) -> String {
-    const MARKER: &str = "@file:";
+    const MARKER: &str = "@file";
     let mut result = String::new();
     let mut remaining = text;
     while let Some(pos) = remaining.find(MARKER) {
         result.push_str(&remaining[..pos]);
         let after = &remaining[pos + MARKER.len()..];
-        let body_end = after.find(char::is_whitespace).unwrap_or(after.len());
-        let body = &after[..body_end];
-        match parse_file_ref(body) {
-            Some(file_ref) => {
+        match parse_file_ref_at(after) {
+            Some((consumed, file_ref)) => {
                 let key = format!("{}|{:?}|{:?}", file_ref.path, file_ref.line, file_ref.col);
                 let chip = file_ref_chip(&file_ref);
                 if seen_file_refs.insert(key) {
@@ -361,67 +383,89 @@ fn replace_file_refs(
                 let idx = chips.len();
                 chips.push(chip);
                 result.push_str(&format!("\x00FR{idx}\x00"));
+                remaining = &after[consumed..];
             }
             None => {
                 result.push_str(MARKER);
-                result.push_str(body);
+                remaining = after;
             }
         }
-        remaining = &after[body_end..];
     }
     result.push_str(remaining);
     result
 }
 
-/// Parse a `@file:` token body. Trailing numeric `:line` and `:line:col`
-/// segments are split off; the remainder is the path. None if the body is empty.
-fn parse_file_ref(body: &str) -> Option<FileRef> {
-    if body.is_empty() {
+/// Parse a file ref immediately after the `@file` marker. `:path[:line[:col]]`
+/// is the bare form; `[label](path[:line[:col]])` is the labeled form. Returns
+/// the bytes consumed from `after` and the parsed FileRef, or None.
+fn parse_file_ref_at(after: &str) -> Option<(usize, FileRef)> {
+    match after.chars().next()? {
+        ':' => {
+            let rest = &after[1..];
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            let (path, line, col) = parse_file_target(&rest[..end])?;
+            Some((
+                1 + end,
+                FileRef {
+                    path,
+                    line,
+                    col,
+                    label: None,
+                },
+            ))
+        }
+        '[' => {
+            let rest = &after[1..];
+            let label_end = rest.find(']')?;
+            let label = rest[..label_end].to_string();
+            let after_label = &rest[label_end + 1..];
+            if !after_label.starts_with('(') {
+                return None;
+            }
+            let in_paren = &after_label[1..];
+            let paren_end = in_paren.find(')')?;
+            let (path, line, col) = parse_file_target(in_paren[..paren_end].trim())?;
+            let consumed = 1 + label_end + 1 + 1 + paren_end + 1;
+            Some((
+                consumed,
+                FileRef {
+                    path,
+                    line,
+                    col,
+                    label: Some(label),
+                },
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Split a target into path and trailing numeric `:line[:col]`. None if empty.
+fn parse_file_target(target: &str) -> Option<(String, Option<usize>, Option<usize>)> {
+    if target.is_empty() {
         return None;
     }
-    let parts: Vec<&str> = body.split(':').collect();
+    let parts: Vec<&str> = target.split(':').collect();
     let is_num = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let n = parts.len();
     if n >= 3 && is_num(parts[n - 1]) && is_num(parts[n - 2]) {
         let path = parts[..n - 2].join(":");
         if !path.is_empty() {
-            return Some(FileRef {
-                path,
-                line: parts[n - 2].parse().ok(),
-                col: parts[n - 1].parse().ok(),
-            });
+            return Some((path, parts[n - 2].parse().ok(), parts[n - 1].parse().ok()));
         }
     }
     if n >= 2 && is_num(parts[n - 1]) {
         let path = parts[..n - 1].join(":");
         if !path.is_empty() {
-            return Some(FileRef {
-                path,
-                line: parts[n - 1].parse().ok(),
-                col: None,
-            });
+            return Some((path, parts[n - 1].parse().ok(), None));
         }
     }
-    Some(FileRef {
-        path: body.to_string(),
-        line: None,
-        col: None,
-    })
+    Some((target.to_string(), None, None))
 }
 
-/// Styled inline chip for a file ref: a green, bold, underlined `↪path:line`.
+/// Styled inline chip for a file ref: a green, bold, underlined `↪label`.
 fn file_ref_chip(file_ref: &FileRef) -> String {
-    let mut label = String::from("↪");
-    label.push_str(&file_ref.path);
-    if let Some(line) = file_ref.line {
-        label.push(':');
-        label.push_str(&line.to_string());
-        if let Some(col) = file_ref.col {
-            label.push(':');
-            label.push_str(&col.to_string());
-        }
-    }
-    ansi_bold_underline_256(76, &label)
+    ansi_bold_underline_256(76, &format!("↪{}", file_ref.display()))
 }
 
 /// A simple regex replacement function using a manual approach to avoid
@@ -2250,9 +2294,23 @@ mod tests {
         assert_eq!(result.file_refs[0].path, "src/store.rs");
         assert_eq!(result.file_refs[0].line, Some(1290));
         assert_eq!(result.file_refs[0].col, None);
+        assert_eq!(result.file_refs[0].label, None);
         let plain = result.plain.join("\n");
-        assert!(plain.contains("↪src/store.rs:1290"), "chip rendered: {plain}");
-        assert!(!plain.contains("@file:"), "raw token consumed: {plain}");
+        // Bare chip shows the basename, not the full path.
+        assert!(plain.contains("↪store.rs:1290"), "chip rendered: {plain}");
+        assert!(!plain.contains("@file"), "raw token consumed: {plain}");
+    }
+
+    #[test]
+    fn file_refs_support_labeled_form() {
+        let result = render("see @file[the store](/abs/store.rs:64) here", 80);
+        assert_eq!(result.file_refs.len(), 1);
+        assert_eq!(result.file_refs[0].path, "/abs/store.rs");
+        assert_eq!(result.file_refs[0].line, Some(64));
+        assert_eq!(result.file_refs[0].label.as_deref(), Some("the store"));
+        let plain = result.plain.join("\n");
+        assert!(plain.contains("↪the store"), "chip shows label: {plain}");
+        assert!(!plain.contains("@file"), "token consumed: {plain}");
     }
 
     #[test]
