@@ -235,6 +235,11 @@ fn is_plain_text_code_lang(lang: &str) -> bool {
     matches!(normalized.as_str(), "text" | "txt" | "plain")
 }
 
+fn is_math_code_lang(lang: &str) -> bool {
+    let normalized = lang.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "math" | "equation" | "equations")
+}
+
 fn syntax_for_lang<'a>(lang: &str, syntaxes: &'a SyntaxSet) -> Option<&'a SyntaxReference> {
     let normalized = lang.trim().to_ascii_lowercase();
     let candidate = match normalized.as_str() {
@@ -269,7 +274,453 @@ fn highlighted_code_lines(lang: &str, code: &str) -> Option<Vec<String>> {
     Some(lines)
 }
 
+fn render_math_lines(code: &str) -> Vec<String> {
+    code.split('\n')
+        .map(|line| format!("  {}", render_math_line(line)))
+        .collect()
+}
+
+fn render_math_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let leading_len = line.len() - trimmed.len();
+    let leading = &line[..leading_len];
+
+    for label in ["Answer:", "Result:", "Solution:"] {
+        if let Some(rest) = trimmed.strip_prefix(label) {
+            return format!(
+                "{leading}{}{}",
+                ansi_bold_256(114, label),
+                render_math_tokens(rest, MathTone::Answer)
+            );
+        }
+    }
+
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    format!("{leading}{}", render_math_segments(trimmed))
+}
+
+#[derive(Clone, Copy)]
+enum MathTone {
+    Expression,
+    Annotation,
+    Answer,
+}
+
+fn render_math_segments(text: &str) -> String {
+    if let Some((label, after)) = split_math_control_label(text) {
+        return format!(
+            "{}{}{}",
+            render_math_label(label.trim()),
+            ansi_256(244, ": "),
+            render_math_annotation(after.trim_start())
+        );
+    }
+
+    if let Some((before, after)) = split_expression_annotation(text) {
+        return format!(
+            "{}{}{}",
+            render_math_chain(before.trim_end(), true),
+            "   ",
+            render_math_annotation(after.trim_start())
+        );
+    }
+
+    if let Some((core, note)) = split_trailing_note(text) {
+        return format!(
+            "{}{}{}",
+            render_math_chain(core.trim_end(), true),
+            "   ",
+            render_math_tokens(note.trim_start(), MathTone::Annotation)
+        );
+    }
+
+    if looks_like_prose_math_line(text) {
+        return render_math_tokens(text, MathTone::Annotation);
+    }
+
+    if has_math_syntax(text) {
+        render_math_chain(text, should_pop_final_math(text))
+    } else {
+        ansi_dim(text)
+    }
+}
+
+fn render_math_label(label: &str) -> String {
+    ansi_bold_256(81, label)
+}
+
+fn render_math_annotation(text: &str) -> String {
+    if let Some((before, marker, after)) = split_last_relation(text) {
+        let (answer, tail) = split_answer_tail(after);
+        return format!(
+            "{}{}{}{}",
+            render_math_tokens(before, MathTone::Annotation),
+            ansi_bold_256(114, marker),
+            render_math_tokens(answer, MathTone::Answer),
+            render_math_tokens(tail, MathTone::Annotation)
+        );
+    }
+
+    render_math_tokens(text, MathTone::Annotation)
+}
+
+fn render_math_chain(text: &str, pop_final: bool) -> String {
+    if pop_final {
+        if let Some((before, marker, after)) = split_last_relation(text) {
+            let (answer, tail) = split_answer_tail(after);
+            return format!(
+                "{}{}{}{}",
+                render_math_tokens(before, MathTone::Expression),
+                ansi_bold_256(114, marker),
+                render_math_tokens(answer, MathTone::Answer),
+                render_math_tokens(tail, MathTone::Annotation)
+            );
+        }
+    }
+
+    render_math_tokens(text, MathTone::Expression)
+}
+
+fn split_math_control_label(text: &str) -> Option<(&str, &str)> {
+    let (before, after) = text.split_once(':')?;
+    let label = before.trim();
+    if label.is_empty() {
+        return None;
+    }
+
+    if label.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return Some((before, after));
+    }
+
+    None
+}
+
+fn split_expression_annotation(text: &str) -> Option<(&str, &str)> {
+    let (before, after) = text.split_once(':')?;
+    if has_math_syntax(before) {
+        return Some((before, after));
+    }
+
+    None
+}
+
+fn split_last_relation(text: &str) -> Option<(&str, &str, &str)> {
+    let (idx, marker) = last_relation(text)?;
+    let marker_end = idx + marker.len();
+    Some((&text[..idx], &text[idx..marker_end], &text[marker_end..]))
+}
+
+fn last_relation(text: &str) -> Option<(usize, &'static str)> {
+    let mut last = None;
+    let mut skip_until = 0;
+
+    for (idx, _) in text.char_indices() {
+        if idx < skip_until {
+            continue;
+        }
+        if let Some(marker) = relation_at(text, idx) {
+            last = Some((idx, marker));
+            skip_until = idx + marker.len();
+        }
+    }
+
+    last
+}
+
+fn relation_at(text: &str, idx: usize) -> Option<&'static str> {
+    let rest = &text[idx..];
+    for marker in ["->", "<=", ">=", "!=", "=", "<", ">"] {
+        if rest.starts_with(marker) {
+            return Some(marker);
+        }
+    }
+
+    None
+}
+
+fn relation_count(text: &str) -> usize {
+    let mut count = 0;
+    let mut skip_until = 0;
+
+    for (idx, _) in text.char_indices() {
+        if idx < skip_until {
+            continue;
+        }
+        if let Some(marker) = relation_at(text, idx) {
+            count += 1;
+            skip_until = idx + marker.len();
+        }
+    }
+
+    count
+}
+
+fn first_relation(text: &str) -> Option<(usize, &'static str)> {
+    let mut skip_until = 0;
+
+    for (idx, _) in text.char_indices() {
+        if idx < skip_until {
+            continue;
+        }
+        if let Some(marker) = relation_at(text, idx) {
+            return Some((idx, marker));
+        }
+        skip_until = idx;
+    }
+
+    None
+}
+
+fn split_answer_tail(text: &str) -> (&str, &str) {
+    let mut seen_answer = false;
+    let mut prev_space = false;
+
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if seen_answer && prev_space {
+                return text.split_at(idx - 1);
+            }
+            prev_space = true;
+            continue;
+        }
+
+        if seen_answer && matches!(ch, '(' | ',' | ';') {
+            return text.split_at(idx);
+        }
+
+        seen_answer = true;
+        prev_space = false;
+    }
+
+    (text, "")
+}
+
+fn split_trailing_note(text: &str) -> Option<(&str, &str)> {
+    let mut run_start = None;
+    let mut run_len = 0;
+    let mut candidate = None;
+
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if run_start.is_none() {
+                run_start = Some(idx);
+            }
+            run_len += 1;
+            continue;
+        }
+
+        if let Some(start) = run_start {
+            if run_len >= 2 {
+                let before = text[..start].trim_end();
+                let after = text[idx..].trim_start();
+                if is_trailing_math_note(before, after) {
+                    candidate = Some((start, idx));
+                }
+            }
+        }
+
+        run_start = None;
+        run_len = 0;
+    }
+
+    let (space_start, note_start) = candidate?;
+    Some((&text[..space_start], &text[note_start..]))
+}
+
+fn is_trailing_math_note(before: &str, after: &str) -> bool {
+    if before.is_empty() || after.is_empty() || !has_math_syntax(before) {
+        return false;
+    }
+
+    if after.starts_with(['=', '<', '>', '+', '*', '/', '^']) || after.starts_with("->") {
+        return false;
+    }
+
+    after.starts_with('(')
+        || after
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+}
+
+fn should_pop_final_math(text: &str) -> bool {
+    !is_math_guide_line(text) && (text.contains("->") || relation_count(text) >= 2)
+}
+
+fn looks_like_prose_math_line(text: &str) -> bool {
+    let Some((idx, _)) = first_relation(text) else {
+        return false;
+    };
+    let before_relation = &text[..idx];
+    let prose_word_count = before_relation
+        .split_whitespace()
+        .filter(|word| {
+            let trimmed = word.trim_matches(|ch: char| !ch.is_ascii_alphabetic());
+            trimmed.len() > 1 && trimmed.chars().all(|ch| ch.is_ascii_alphabetic())
+        })
+        .count();
+
+    prose_word_count >= 2
+}
+
+fn is_math_guide_line(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.contains("----") || trimmed.starts_with("...")
+}
+
+fn has_math_syntax(text: &str) -> bool {
+    text.chars().any(|ch| {
+        ch.is_ascii_digit() || matches!(ch, '=' | '<' | '>' | '+' | '*' | '/' | '^' | '|')
+    }) || text.contains("->")
+}
+
+fn render_math_tokens(text: &str, tone: MathTone) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_ascii_whitespace() {
+            out.push(ch);
+            chars.next();
+            continue;
+        }
+
+        if ch == '.' {
+            let mut lookahead = chars.clone();
+            lookahead.next();
+            if !lookahead.peek().is_some_and(|c| c.is_ascii_digit()) {
+                let token = take_while(&mut chars, |c| c == '.');
+                out.push_str(&ansi_256(244, &token));
+                continue;
+            }
+        }
+
+        if ch.is_ascii_digit() || ch == '.' {
+            let token = take_while(&mut chars, |c| c.is_ascii_digit() || c == '.');
+            out.push_str(&style_math_number(&token, tone));
+            continue;
+        }
+
+        if ch.is_ascii_alphabetic() {
+            let token = take_while(&mut chars, |c| {
+                c.is_ascii_alphanumeric() || matches!(c, '_' | '\'')
+            });
+            out.push_str(&style_math_ident(&token, tone));
+            continue;
+        }
+
+        if matches!(ch, '=' | '<' | '>') {
+            let token = take_while(&mut chars, |c| matches!(c, '=' | '<' | '>'));
+            out.push_str(&style_math_relation(&token, tone));
+            continue;
+        }
+
+        if ch == '-' {
+            chars.next();
+            if chars.peek() == Some(&'>') {
+                chars.next();
+                out.push_str(&style_math_relation("->", tone));
+            } else if chars.peek() == Some(&'-') {
+                let mut token = String::from("-");
+                token.push_str(&take_while(&mut chars, |c| c == '-'));
+                out.push_str(&ansi_256(244, &token));
+            } else {
+                out.push_str(&style_math_operator("-", tone));
+            }
+            continue;
+        }
+
+        if matches!(ch, '+' | '*' | '/' | '^') {
+            chars.next();
+            out.push_str(&style_math_operator(&ch.to_string(), tone));
+            continue;
+        }
+
+        if matches!(ch, '(' | ')' | '[' | ']' | '{' | '}' | '|') {
+            chars.next();
+            out.push_str(&style_math_grouping(&ch.to_string(), tone));
+            continue;
+        }
+
+        if matches!(ch, ':' | ',' | ';') {
+            chars.next();
+            out.push_str(&ansi_256(244, &ch.to_string()));
+            continue;
+        }
+
+        chars.next();
+        match tone {
+            MathTone::Expression => out.push(ch),
+            MathTone::Annotation => out.push_str(&ansi_dim(&ch.to_string())),
+            MathTone::Answer => out.push_str(&ansi_bold_256(220, &ch.to_string())),
+        }
+    }
+
+    out
+}
+
+fn style_math_number(token: &str, tone: MathTone) -> String {
+    match tone {
+        MathTone::Expression => ansi_bold(token),
+        MathTone::Annotation => ansi_256(81, token),
+        MathTone::Answer => ansi_bold_256(220, token),
+    }
+}
+
+fn style_math_ident(token: &str, tone: MathTone) -> String {
+    match tone {
+        MathTone::Expression => token.to_string(),
+        MathTone::Annotation => ansi_dim(token),
+        MathTone::Answer => ansi_bold_256(220, token),
+    }
+}
+
+fn style_math_operator(token: &str, tone: MathTone) -> String {
+    match tone {
+        MathTone::Expression => ansi_256(114, token),
+        MathTone::Annotation => ansi_256(81, token),
+        MathTone::Answer => ansi_bold_256(220, token),
+    }
+}
+
+fn style_math_relation(token: &str, tone: MathTone) -> String {
+    match tone {
+        MathTone::Expression | MathTone::Answer => ansi_bold_256(114, token),
+        MathTone::Annotation => ansi_256(81, token),
+    }
+}
+
+fn style_math_grouping(token: &str, tone: MathTone) -> String {
+    match tone {
+        MathTone::Expression => ansi_256(250, token),
+        MathTone::Annotation => ansi_256(244, token),
+        MathTone::Answer => ansi_bold_256(220, token),
+    }
+}
+
+fn take_while<F>(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, mut predicate: F) -> String
+where
+    F: FnMut(char) -> bool,
+{
+    let mut token = String::new();
+    while let Some(ch) = chars.peek().copied() {
+        if !predicate(ch) {
+            break;
+        }
+        token.push(ch);
+        chars.next();
+    }
+    token
+}
+
 fn render_code_lines(lang: &str, code: &str) -> Vec<String> {
+    if is_math_code_lang(lang) {
+        return render_math_lines(code);
+    }
+
     if is_plain_text_code_lang(lang) {
         return code
             .split('\n')
@@ -1415,7 +1866,13 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
                 }
-                let styled = render_inline(text, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs);
+                let styled = render_inline(
+                    text,
+                    &mut ctx.links,
+                    &mut ctx.seen_links,
+                    &mut ctx.file_refs,
+                    &mut ctx.seen_file_refs,
+                );
                 let wrapped = wrap_line(&styled, ctx.width, "");
                 out.extend(wrapped);
             }
@@ -1433,7 +1890,13 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                         (format!("{} ", ansi_dim("\u{2022}")), 2) // "• "
                     };
                     let hang_indent = " ".repeat(bullet_plain_width);
-                    let styled = render_inline(item, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs);
+                    let styled = render_inline(
+                        item,
+                        &mut ctx.links,
+                        &mut ctx.seen_links,
+                        &mut ctx.file_refs,
+                        &mut ctx.seen_file_refs,
+                    );
                     let item_width = ctx.width.saturating_sub(bullet_plain_width);
                     let effective_width = if item_width > 10 {
                         item_width
@@ -1460,7 +1923,13 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     if bq_line.trim().is_empty() {
                         out.push(bar.clone());
                     } else {
-                        let styled = render_inline(bq_line, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs);
+                        let styled = render_inline(
+                            bq_line,
+                            &mut ctx.links,
+                            &mut ctx.seen_links,
+                            &mut ctx.file_refs,
+                            &mut ctx.seen_file_refs,
+                        );
                         let effective_width = if bq_width > 10 { bq_width } else { ctx.width };
                         let wrapped = wrap_line(&styled, effective_width, "");
                         for w in &wrapped {
@@ -1536,7 +2005,15 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     // Pre-render all cells through render_inline so we can measure VISIBLE width
     let rendered_headers: Vec<String> = headers
         .iter()
-        .map(|h| render_inline(h, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs))
+        .map(|h| {
+            render_inline(
+                h,
+                &mut ctx.links,
+                &mut ctx.seen_links,
+                &mut ctx.file_refs,
+                &mut ctx.seen_file_refs,
+            )
+        })
         .collect();
     let rendered_rows: Vec<Vec<String>> = rows
         .iter()
@@ -1544,7 +2021,13 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
             (0..num_cols)
                 .map(|c| {
                     let text = row.get(c).map(|s| s.as_str()).unwrap_or("");
-                    render_inline(text, &mut ctx.links, &mut ctx.seen_links, &mut ctx.file_refs, &mut ctx.seen_file_refs)
+                    render_inline(
+                        text,
+                        &mut ctx.links,
+                        &mut ctx.seen_links,
+                        &mut ctx.file_refs,
+                        &mut ctx.seen_file_refs,
+                    )
                 })
                 .collect()
         })
@@ -2219,13 +2702,17 @@ mod tests {
         assert!(plain.contains("deliberately"), "footnote text is present");
         // The footnote wraps to the caption width (the readable floor for a tiny
         // diagram), not the full viewport — so it never sprawls edge-to-edge.
-        let max = result.plain.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let max = result
+            .plain
+            .iter()
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
         assert!(
             max <= 60,
             "footnote wraps to caption width (~56), not the 120-col viewport (got {max})"
         );
     }
-
 
     #[test]
     fn sketch_blocks_with_errors_fail_loudly() {
@@ -2284,6 +2771,168 @@ mod tests {
         assert!(
             !result.rendered.contains("\x1b[2mplain text\x1b[22m"),
             "expected text code block to render without muted styling"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_style_expression_relations_and_answers() {
+        let content = "```math\n(-8) + 5 = -3\nAnswer: -3\n```";
+        let result = render_with_viewport(content, 72, 72);
+        let plain = result.plain.join("\n");
+
+        assert!(
+            plain.contains("(-8) + 5 = -3"),
+            "math block keeps searchable plain text: {plain}"
+        );
+        assert!(
+            plain.contains("Answer: -3"),
+            "answer label remains in plain text: {plain}"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m8\x1b[22m"),
+            "ordinary expression numbers receive calm emphasis"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;114m="),
+            "relations receive strong math styling"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;114m+\x1b[39m"),
+            "primary expression operators remain readable as math signs"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;220m3"),
+            "answer values receive the strongest emphasis"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_dim_annotations_and_pop_final_result() {
+        let content = "```math\n(-6) + (-3): sizes 6 and 3 -> 6 + 3 = 9, both negative -> -9\n```";
+        let result = render_with_viewport(content, 100, 100);
+
+        assert!(
+            !result.rendered.contains("│"),
+            "math blocks should not insert decorative bars"
+        );
+        assert!(
+            result.rendered.contains("\x1b[2msizes\x1b[22m"),
+            "annotation prose should be dim"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;81m6\x1b[39m"),
+            "annotation numbers should stay readable as reasoning math"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;81m+\x1b[39m"),
+            "annotation operators should be visible but secondary"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;81m=\x1b[39m"),
+            "annotation relations should stay readable inside worked steps"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;114m->"),
+            "final transformation marker should anchor the final result"
+        );
+        assert!(
+            result
+                .rendered
+                .contains("\x1b[1m\x1b[38;5;220m-\x1b[39m\x1b[22m\x1b[1m\x1b[38;5;220m9"),
+            "final result should pop as the answer"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_render_step_labels_as_controls() {
+        let content = "```math\nEvaluate:  -3 + 4 * (-2) - (-5)\nStep 1  multiply first:   4 * (-2) = -8\n```";
+        let result = render_with_viewport(content, 100, 100);
+
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;81mEvaluate"),
+            "evaluate labels should render as compact math-block controls"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;81mStep 1"),
+            "step labels should render as compact math-block controls"
+        );
+        assert!(
+            result
+                .rendered
+                .contains("\x1b[1m\x1b[38;5;220m-\x1b[39m\x1b[22m\x1b[1m\x1b[38;5;220m8"),
+            "step results should pop when a line performs a worked transformation"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_keep_reference_formulas_calm() {
+        let content = "```math\na/d + b/d = (a + b)/d\n```";
+        let result = render_with_viewport(content, 72, 72);
+
+        assert!(
+            result.rendered.contains("\x1b[38;5;250m(\x1b[39m"),
+            "grouping marks inside expressions should stay visible"
+        );
+        assert!(
+            !result.rendered.contains("\x1b[1m\x1b[38;5;220m("),
+            "single-reference formulas should not make the right side look like a final answer"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_keep_prose_steps_supporting() {
+        let content = "```math\nSigns differ (one negative, one positive) -> subtract the sizes.\nSizes: 9 and 4 -> 9 - 4 = 5\n```";
+        let result = render_with_viewport(content, 100, 100);
+
+        assert!(
+            result.rendered.contains("\x1b[2mSigns\x1b[22m"),
+            "prose-heavy lines inside math blocks should remain supporting text"
+        );
+        assert!(
+            !result.rendered.contains("\x1b[1m\x1b[38;5;220msubtract"),
+            "prose after an arrow should not be styled as a final numeric answer"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;220m5"),
+            "labeled size calculations should still pop their final result"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_support_equation_alias() {
+        let content = "```equation\nx <= 5\n```";
+        let result = render_with_viewport(content, 72, 72);
+
+        assert!(
+            result.plain.iter().any(|line| line.contains("x <= 5")),
+            "equation alias should preserve expression text"
+        );
+        assert!(
+            result.rendered.contains("\x1b[1m\x1b[38;5;114m<="),
+            "compound relations receive relation styling"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_mute_ascii_guides() {
+        let content = "```math\n... -3, -2, -1, 0, 1, 2, 3 ...\n<----|---->\n```";
+        let result = render_with_viewport(content, 72, 72);
+
+        assert!(
+            result.plain.iter().any(|line| line.contains("<----|---->")),
+            "guide line remains searchable"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;244m----"),
+            "dash guide runs are muted"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;244m..."),
+            "ellipsis guide runs are muted"
+        );
+        assert!(
+            result.rendered.contains("\x1b[38;5;114m-\x1b[39m\x1b[1m3"),
+            "negative signs still render as operators before emphasized numbers"
         );
     }
 
