@@ -275,36 +275,94 @@ fn highlighted_code_lines(lang: &str, code: &str) -> Option<Vec<String>> {
 }
 
 fn render_math_lines(code: &str) -> Vec<String> {
-    code.split('\n')
-        .map(|line| format!("  {}", render_math_line(line)))
+    let plans: Vec<MathLinePlan> = code.split('\n').map(plan_math_line).collect();
+    let reason_columns = math_reason_columns(&plans);
+
+    plans
+        .into_iter()
+        .zip(reason_columns)
+        .map(|(plan, reason_column)| format!("  {}", render_math_plan(plan, reason_column)))
         .collect()
 }
 
-fn render_math_line(line: &str) -> String {
+enum MathLinePlan {
+    Rendered(String),
+    WithReason { main: String, reason: String },
+}
+
+fn plan_math_line(line: &str) -> MathLinePlan {
     let trimmed = line.trim_start();
     let leading_len = line.len() - trimmed.len();
     let leading = &line[..leading_len];
 
     for label in ["Answer:", "Result:", "Solution:"] {
         if let Some(rest) = trimmed.strip_prefix(label) {
-            return format!(
+            return MathLinePlan::Rendered(format!(
                 "{leading}{}{}",
                 ansi_bold_256(114, label),
                 render_math_tokens(rest, MathTone::Answer)
-            );
+            ));
         }
     }
 
     if trimmed.is_empty() {
-        return String::new();
+        return MathLinePlan::Rendered(String::new());
     }
 
-    format!("{leading}{}", render_math_segments(trimmed))
+    if split_math_control_label(trimmed).is_some() {
+        return MathLinePlan::Rendered(format!("{leading}{}", render_math_segments(trimmed)));
+    }
+
+    if let Some((core, note)) = split_trailing_note(trimmed) {
+        return MathLinePlan::WithReason {
+            main: format!("{leading}{}", render_math_chain(core.trim_end(), true)),
+            reason: render_math_tokens(note.trim_start(), MathTone::Reason),
+        };
+    }
+
+    MathLinePlan::Rendered(format!("{leading}{}", render_math_segments(trimmed)))
+}
+
+fn math_reason_columns(plans: &[MathLinePlan]) -> Vec<Option<usize>> {
+    let mut columns = vec![None; plans.len()];
+    let mut idx = 0;
+
+    while idx < plans.len() {
+        let MathLinePlan::WithReason { .. } = &plans[idx] else {
+            idx += 1;
+            continue;
+        };
+
+        let start = idx;
+        let mut column = 0;
+        while let Some(MathLinePlan::WithReason { main, .. }) = plans.get(idx) {
+            column = column.max(visible_width(main));
+            idx += 1;
+        }
+
+        for slot in columns.iter_mut().take(idx).skip(start) {
+            *slot = Some(column);
+        }
+    }
+
+    columns
+}
+
+fn render_math_plan(plan: MathLinePlan, reason_column: Option<usize>) -> String {
+    match plan {
+        MathLinePlan::Rendered(rendered) => rendered,
+        MathLinePlan::WithReason { main, reason } => {
+            let column = reason_column.unwrap_or_else(|| visible_width(&main));
+            let gap = column.saturating_sub(visible_width(&main)) + 4;
+            format!("{main}{}{reason}", " ".repeat(gap))
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
 enum MathTone {
     Expression,
+    Reason,
     Annotation,
     Answer,
 }
@@ -328,17 +386,8 @@ fn render_math_segments(text: &str) -> String {
         );
     }
 
-    if let Some((core, note)) = split_trailing_note(text) {
-        return format!(
-            "{}{}{}",
-            render_math_chain(core.trim_end(), true),
-            "   ",
-            render_math_tokens(note.trim_start(), MathTone::Annotation)
-        );
-    }
-
     if looks_like_prose_math_line(text) {
-        return render_math_tokens(text, MathTone::Annotation);
+        return render_math_tokens(text, MathTone::Reason);
     }
 
     if has_math_syntax(text) {
@@ -391,11 +440,25 @@ fn split_math_control_label(text: &str) -> Option<(&str, &str)> {
         return None;
     }
 
-    if label.chars().any(|ch| ch.is_ascii_alphabetic()) {
+    if is_math_control_label(label) {
         return Some((before, after));
     }
 
     None
+}
+
+fn is_math_control_label(label: &str) -> bool {
+    if matches!(label, "Evaluate" | "Answer" | "Result" | "Solution") {
+        return true;
+    }
+
+    let Some(rest) = label.strip_prefix("Step ") else {
+        return false;
+    };
+
+    rest.split_whitespace()
+        .next()
+        .is_some_and(|step| step.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn split_expression_annotation(text: &str) -> Option<(&str, &str)> {
@@ -654,6 +717,7 @@ fn render_math_tokens(text: &str, tone: MathTone) -> String {
         chars.next();
         match tone {
             MathTone::Expression => out.push(ch),
+            MathTone::Reason => out.push_str(&ansi_dim(&ch.to_string())),
             MathTone::Annotation => out.push_str(&ansi_dim(&ch.to_string())),
             MathTone::Answer => out.push_str(&ansi_bold_256(220, &ch.to_string())),
         }
@@ -665,6 +729,7 @@ fn render_math_tokens(text: &str, tone: MathTone) -> String {
 fn style_math_number(token: &str, tone: MathTone) -> String {
     match tone {
         MathTone::Expression => ansi_bold(token),
+        MathTone::Reason => ansi_256(110, token),
         MathTone::Annotation => ansi_256(81, token),
         MathTone::Answer => ansi_bold_256(220, token),
     }
@@ -673,6 +738,7 @@ fn style_math_number(token: &str, tone: MathTone) -> String {
 fn style_math_ident(token: &str, tone: MathTone) -> String {
     match tone {
         MathTone::Expression => token.to_string(),
+        MathTone::Reason => ansi_dim(token),
         MathTone::Annotation => ansi_dim(token),
         MathTone::Answer => ansi_bold_256(220, token),
     }
@@ -681,6 +747,7 @@ fn style_math_ident(token: &str, tone: MathTone) -> String {
 fn style_math_operator(token: &str, tone: MathTone) -> String {
     match tone {
         MathTone::Expression => ansi_256(114, token),
+        MathTone::Reason => ansi_256(245, token),
         MathTone::Annotation => ansi_256(81, token),
         MathTone::Answer => ansi_bold_256(220, token),
     }
@@ -689,6 +756,7 @@ fn style_math_operator(token: &str, tone: MathTone) -> String {
 fn style_math_relation(token: &str, tone: MathTone) -> String {
     match tone {
         MathTone::Expression | MathTone::Answer => ansi_bold_256(114, token),
+        MathTone::Reason => ansi_256(245, token),
         MathTone::Annotation => ansi_256(81, token),
     }
 }
@@ -696,6 +764,7 @@ fn style_math_relation(token: &str, tone: MathTone) -> String {
 fn style_math_grouping(token: &str, tone: MathTone) -> String {
     match tone {
         MathTone::Expression => ansi_256(250, token),
+        MathTone::Reason => ansi_256(244, token),
         MathTone::Annotation => ansi_256(244, token),
         MathTone::Answer => ansi_bold_256(220, token),
     }
@@ -2893,8 +2962,47 @@ mod tests {
             "prose after an arrow should not be styled as a final numeric answer"
         );
         assert!(
-            result.rendered.contains("\x1b[1m\x1b[38;5;220m5"),
-            "labeled size calculations should still pop their final result"
+            !result.rendered.contains("\x1b[1m\x1b[38;5;220m5"),
+            "prose-heavy worked notes should not pop mini-calculations as answers"
+        );
+    }
+
+    #[test]
+    fn math_code_blocks_keep_trailing_reasons_secondary() {
+        let content = "```math\n5 - 8        = 5 + (-8)   = -3      (different signs: 8 - 5 = 3, keep negative)\n5 - (-3)     = 5 + 3      = 8       (subtracting a negative adds)\n-4 - 6       = -4 + (-6)  = -10     (same signs: 4 + 6 = 10, keep negative)\n-4 - (-9)    = -4 + 9     = 5       (different signs: 9 - 4 = 5, keep positive)\n```";
+        let result = render_with_viewport(content, 100, 100);
+        let reason_starts: Vec<usize> = result
+            .plain
+            .iter()
+            .filter_map(|line| {
+                ["(different signs", "(subtracting", "(same signs"]
+                    .into_iter()
+                    .find_map(|marker| line.find(marker))
+            })
+            .collect();
+
+        assert!(
+            result
+                .rendered
+                .contains("\x1b[1m\x1b[38;5;220m-\x1b[39m\x1b[22m\x1b[1m\x1b[38;5;220m3"),
+            "main equation result should pop"
+        );
+        assert!(
+            !result
+                .rendered
+                .contains("\x1b[1m\x1b[38;5;81mdifferent signs"),
+            "trailing reason labels should not render as controls"
+        );
+        assert!(
+            !result
+                .rendered
+                .contains("\x1b[1m\x1b[38;5;220m3\x1b[39m\x1b[22m, keep negative"),
+            "mini-calculation inside the reason should not compete as an answer"
+        );
+        assert_eq!(reason_starts.len(), 4, "expected four trailing reasons");
+        assert!(
+            reason_starts.windows(2).all(|pair| pair[0] == pair[1]),
+            "trailing reason notes should align as one column: {reason_starts:?}"
         );
     }
 
