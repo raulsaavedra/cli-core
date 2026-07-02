@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -41,6 +41,14 @@ pub struct FileRef {
     pub label: Option<String>,
 }
 
+/// A rendered occurrence of a file reference in the markdown output.
+#[derive(Debug, Clone)]
+pub struct FileRefOccurrence {
+    pub file_ref: FileRef,
+    /// Zero-based line index in the rendered plain-text output.
+    pub line: usize,
+}
+
 impl FileRef {
     /// Display text for chips and pickers: the explicit label, else the file
     /// basename with `:line` when present.
@@ -73,6 +81,7 @@ pub struct RenderResult {
     pub headings: Vec<Heading>,
     pub links: Vec<Link>,
     pub file_refs: Vec<FileRef>,
+    pub file_ref_occurrences: Vec<FileRefOccurrence>,
 }
 
 // ---------------------------------------------------------------------------
@@ -817,6 +826,7 @@ fn render_inline(
     seen_links: &mut HashSet<String>,
     file_refs: &mut Vec<FileRef>,
     seen_file_refs: &mut HashSet<String>,
+    file_ref_occurrences: &mut Vec<FileRef>,
 ) -> String {
     let mut text = text.to_string();
 
@@ -830,7 +840,13 @@ fn render_inline(
 
     // 1b. Protect file refs (@file:path[:line[:col]]) as jump-to-editor chips.
     let mut file_chips: Vec<String> = Vec::new();
-    text = replace_file_refs(&text, file_refs, seen_file_refs, &mut file_chips);
+    text = replace_file_refs(
+        &text,
+        file_refs,
+        seen_file_refs,
+        file_ref_occurrences,
+        &mut file_chips,
+    );
 
     // 2. Links: [text](url)
     text = regex_replace_all_with_links(&text, links, seen_links);
@@ -885,6 +901,7 @@ fn replace_file_refs(
     text: &str,
     file_refs: &mut Vec<FileRef>,
     seen_file_refs: &mut HashSet<String>,
+    file_ref_occurrences: &mut Vec<FileRef>,
     chips: &mut Vec<String>,
 ) -> String {
     const MARKER: &str = "@file";
@@ -898,8 +915,9 @@ fn replace_file_refs(
                 let key = format!("{}|{:?}|{:?}", file_ref.path, file_ref.line, file_ref.col);
                 let chip = file_ref_chip(&file_ref);
                 if seen_file_refs.insert(key) {
-                    file_refs.push(file_ref);
+                    file_refs.push(file_ref.clone());
                 }
+                file_ref_occurrences.push(file_ref);
                 let idx = chips.len();
                 chips.push(chip);
                 result.push_str(&format!("\x00FR{idx}\x00"));
@@ -1904,6 +1922,7 @@ struct RenderContext {
     seen_links: HashSet<String>,
     file_refs: Vec<FileRef>,
     seen_file_refs: HashSet<String>,
+    file_ref_occurrences: Vec<FileRef>,
     headings: Vec<Heading>,
 }
 
@@ -1941,6 +1960,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     &mut ctx.seen_links,
                     &mut ctx.file_refs,
                     &mut ctx.seen_file_refs,
+                    &mut ctx.file_ref_occurrences,
                 );
                 let wrapped = wrap_line(&styled, ctx.width, "");
                 out.extend(wrapped);
@@ -1965,6 +1985,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                         &mut ctx.seen_links,
                         &mut ctx.file_refs,
                         &mut ctx.seen_file_refs,
+                        &mut ctx.file_ref_occurrences,
                     );
                     let item_width = ctx.width.saturating_sub(bullet_plain_width);
                     let effective_width = if item_width > 10 {
@@ -1998,6 +2019,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                             &mut ctx.seen_links,
                             &mut ctx.file_refs,
                             &mut ctx.seen_file_refs,
+                            &mut ctx.file_ref_occurrences,
                         );
                         let effective_width = if bq_width > 10 { bq_width } else { ctx.width };
                         let wrapped = wrap_line(&styled, effective_width, "");
@@ -2081,6 +2103,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
                 &mut ctx.seen_links,
                 &mut ctx.file_refs,
                 &mut ctx.seen_file_refs,
+                &mut ctx.file_ref_occurrences,
             )
         })
         .collect();
@@ -2096,6 +2119,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
                         &mut ctx.seen_links,
                         &mut ctx.file_refs,
                         &mut ctx.seen_file_refs,
+                        &mut ctx.file_ref_occurrences,
                     )
                 })
                 .collect()
@@ -2366,6 +2390,10 @@ fn extract_metadata(content: &str) -> (Vec<Heading>, Vec<Link>) {
 fn extract_links_from_line(line: &str, links: &mut Vec<Link>, seen_links: &mut HashSet<String>) {
     let mut remaining = line;
     while let Some(start) = remaining.find('[') {
+        if remaining[..start].ends_with("@file") {
+            remaining = &remaining[start + 1..];
+            continue;
+        }
         let after = &remaining[start + 1..];
         if let Some(end) = after.find(']') {
             let label = after[..end].trim();
@@ -2678,6 +2706,7 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         seen_links: HashSet::new(),
         file_refs: Vec::new(),
         seen_file_refs: HashSet::new(),
+        file_ref_occurrences: Vec::new(),
         headings: Vec::new(),
     };
 
@@ -2706,6 +2735,7 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
 
     // Remap heading line indices.
     remap_heading_lines(&mut ctx.headings, &plain);
+    let file_ref_occurrences = map_file_ref_occurrences(&ctx.file_ref_occurrences, &plain);
 
     // Merge links from metadata extraction with those found during rendering.
     let mut all_links = ctx.links.clone();
@@ -2726,7 +2756,52 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         headings: ctx.headings,
         links: all_links,
         file_refs: ctx.file_refs,
+        file_ref_occurrences,
     }
+}
+
+fn map_file_ref_occurrences(occurrences: &[FileRef], plain: &[String]) -> Vec<FileRefOccurrence> {
+    let mut mapped = Vec::with_capacity(occurrences.len());
+    let mut consumed_by_needle: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut search_start = 0usize;
+
+    for file_ref in occurrences {
+        let needle = format!("↪{}", file_ref.display());
+        let consumed_by_line = consumed_by_needle
+            .entry(needle.clone())
+            .or_insert_with(|| vec![0usize; plain.len()]);
+        let mut found = None;
+
+        for (line_index, line) in plain.iter().enumerate().skip(search_start) {
+            let count = line.matches(&needle).count();
+            if consumed_by_line[line_index] < count {
+                found = Some(line_index);
+                consumed_by_line[line_index] += 1;
+                search_start = line_index;
+                break;
+            }
+        }
+
+        if found.is_none() {
+            for (line_index, line) in plain.iter().enumerate() {
+                let count = line.matches(&needle).count();
+                if consumed_by_line[line_index] < count {
+                    found = Some(line_index);
+                    consumed_by_line[line_index] += 1;
+                    break;
+                }
+            }
+        }
+
+        if let Some(line) = found {
+            mapped.push(FileRefOccurrence {
+                file_ref: file_ref.clone(),
+                line,
+            });
+        }
+    }
+
+    mapped
 }
 
 #[cfg(test)]
@@ -3048,10 +3123,13 @@ mod tests {
     fn file_refs_are_extracted_and_styled() {
         let result = render("See @file:src/store.rs:1290 for the bug.", 80);
         assert_eq!(result.file_refs.len(), 1);
+        assert_eq!(result.file_ref_occurrences.len(), 1);
         assert_eq!(result.file_refs[0].path, "src/store.rs");
         assert_eq!(result.file_refs[0].line, Some(1290));
         assert_eq!(result.file_refs[0].col, None);
         assert_eq!(result.file_refs[0].label, None);
+        assert_eq!(result.file_ref_occurrences[0].file_ref.path, "src/store.rs");
+        assert_eq!(result.file_ref_occurrences[0].line, 0);
         let plain = result.plain.join("\n");
         // Bare chip shows the basename, not the full path.
         assert!(plain.contains("↪store.rs:1290"), "chip rendered: {plain}");
@@ -3062,9 +3140,14 @@ mod tests {
     fn file_refs_support_labeled_form() {
         let result = render("see @file[the store](/abs/store.rs:64) here", 80);
         assert_eq!(result.file_refs.len(), 1);
+        assert_eq!(result.file_ref_occurrences.len(), 1);
         assert_eq!(result.file_refs[0].path, "/abs/store.rs");
         assert_eq!(result.file_refs[0].line, Some(64));
         assert_eq!(result.file_refs[0].label.as_deref(), Some("the store"));
+        assert!(
+            result.links.is_empty(),
+            "@file[label](path) should not also be collected as a normal link"
+        );
         let plain = result.plain.join("\n");
         assert!(plain.contains("↪the store"), "chip shows label: {plain}");
         assert!(!plain.contains("@file"), "token consumed: {plain}");
@@ -3080,6 +3163,23 @@ mod tests {
         assert_eq!(result.file_refs[0].col, Some(5));
         assert_eq!(result.file_refs[1].path, "rel/b.rs");
         assert_eq!(result.file_refs[1].line, None);
+        assert_eq!(
+            result.file_ref_occurrences.len(),
+            3,
+            "occurrences preserve repeated jumps even when targets are deduped"
+        );
+    }
+
+    #[test]
+    fn repeated_file_ref_occurrences_map_to_their_rendered_lines() {
+        let result = render("@file:src/a.rs\n\n@file:src/a.rs", 80);
+        let lines: Vec<usize> = result
+            .file_ref_occurrences
+            .iter()
+            .map(|occurrence| occurrence.line)
+            .collect();
+
+        assert_eq!(lines, vec![0, 2]);
     }
 
     #[test]
