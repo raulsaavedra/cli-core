@@ -8,6 +8,13 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 use syntect::util::as_24_bit_terminal_escaped;
 use unicode_width::UnicodeWidthStr;
 
+const OCCURRENCE_MARKER_START: char = '\u{1e}';
+const OCCURRENCE_MARKER_END: char = '\u{1f}';
+const OCCURRENCE_LINK: char = 'L';
+const OCCURRENCE_FILE_REF: char = 'F';
+const OCCURRENCE_START: char = 'S';
+const OCCURRENCE_END: char = 'E';
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -107,10 +114,35 @@ pub struct RenderResult {
 
 /// Strip all ANSI escape sequences from a string.
 fn strip_ansi(s: &str) -> String {
+    strip_ansi_inner(s, false)
+}
+
+fn strip_ansi_preserving_occurrence_markers(s: &str) -> String {
+    strip_ansi_inner(s, true)
+}
+
+fn strip_ansi_inner(s: &str, preserve_occurrence_markers: bool) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.char_indices().peekable();
     while let Some((_i, ch)) = chars.next() {
-        if ch == '\x1b' {
+        if ch == OCCURRENCE_MARKER_START {
+            if preserve_occurrence_markers {
+                result.push(ch);
+            }
+            let mut complete = false;
+            while let Some((_, c)) = chars.next() {
+                if preserve_occurrence_markers {
+                    result.push(c);
+                }
+                if c == OCCURRENCE_MARKER_END {
+                    complete = true;
+                    break;
+                }
+            }
+            if !preserve_occurrence_markers && !complete {
+                result.push(ch);
+            }
+        } else if ch == '\x1b' {
             // Check if next char is '['
             if let Some(&(_, next_ch)) = chars.peek() {
                 if next_ch == '[' {
@@ -137,6 +169,19 @@ fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(strip_ansi(s).as_str())
 }
 
+fn occurrence_marker(kind: char, edge: char, index: usize) -> String {
+    format!("{OCCURRENCE_MARKER_START}{kind}{edge}{index}{OCCURRENCE_MARKER_END}")
+}
+
+fn wrap_occurrence_marker(kind: char, index: usize, rendered: String) -> String {
+    format!(
+        "{}{}{}",
+        occurrence_marker(kind, OCCURRENCE_START, index),
+        rendered,
+        occurrence_marker(kind, OCCURRENCE_END, index)
+    )
+}
+
 /// Check if a line is visually blank (only whitespace after ANSI stripping).
 fn is_blank_line(line: &str) -> bool {
     strip_ansi(line).trim().is_empty()
@@ -148,6 +193,16 @@ fn truncate_to_width(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut chars = s.char_indices().peekable();
     while let Some((_i, ch)) = chars.next() {
+        if ch == OCCURRENCE_MARKER_START {
+            out.push(ch);
+            while let Some((_, c)) = chars.next() {
+                out.push(c);
+                if c == OCCURRENCE_MARKER_END {
+                    break;
+                }
+            }
+            continue;
+        }
         if ch == '\x1b' {
             // Check if next char is '['
             if let Some(&(_, next_ch)) = chars.peek() {
@@ -932,7 +987,9 @@ fn replace_file_refs(
         match parse_file_ref_at(after) {
             Some((consumed, file_ref)) => {
                 let key = format!("{}|{:?}|{:?}", file_ref.path, file_ref.line, file_ref.col);
-                let chip = file_ref_chip(&file_ref);
+                let index = file_ref_occurrences.len();
+                let chip =
+                    wrap_occurrence_marker(OCCURRENCE_FILE_REF, index, file_ref_chip(&file_ref));
                 if seen_file_refs.insert(key) {
                     file_refs.push(file_ref.clone());
                 }
@@ -1259,14 +1316,21 @@ fn regex_replace_all_with_links(
                             text: display.clone(),
                             href: href.to_string(),
                         };
+                        let index = link_occurrences.len();
                         link_occurrences.push(link.clone());
 
                         if seen_links.insert(key) {
                             links.push(link);
                         }
+                        result.push_str(&wrap_occurrence_marker(
+                            OCCURRENCE_LINK,
+                            index,
+                            ansi_underline(&display),
+                        ));
+                    } else {
+                        result.push_str(&ansi_underline(&display));
                     }
 
-                    result.push_str(&ansi_underline(&display));
                     remaining = &after_close[paren_end + 1..];
                     continue;
                 }
@@ -1315,11 +1379,16 @@ fn replace_bare_urls(
             text: display.clone(),
             href: href.to_string(),
         };
+        let index = link_occurrences.len();
         link_occurrences.push(link.clone());
         if seen_links.insert(key) {
             links.push(link);
         }
-        result.push_str(&ansi_underline(&display));
+        result.push_str(&wrap_occurrence_marker(
+            OCCURRENCE_LINK,
+            index,
+            ansi_underline(&display),
+        ));
         result.push_str(trailing);
         remaining = &candidate[raw_end..];
     }
@@ -1634,6 +1703,16 @@ fn split_words(text: &str) -> Vec<String> {
     let mut chars = text.char_indices().peekable();
 
     while let Some((_i, ch)) = chars.next() {
+        if ch == OCCURRENCE_MARKER_START {
+            current.push(ch);
+            while let Some((_, c)) = chars.next() {
+                current.push(c);
+                if c == OCCURRENCE_MARKER_END {
+                    break;
+                }
+            }
+            continue;
+        }
         // Check for ANSI escape.
         if ch == '\x1b' {
             if let Some(&(_, next_ch)) = chars.peek() {
@@ -2529,6 +2608,13 @@ fn split_ansi_prefix_at_width(text: &str, width: usize) -> (String, String) {
     let mut visible = 0;
 
     while i < bytes.len() {
+        if text[i..].starts_with(OCCURRENCE_MARKER_START) {
+            if let Some(marker_end) = text[i..].find(OCCURRENCE_MARKER_END) {
+                i += marker_end + OCCURRENCE_MARKER_END.len_utf8();
+                continue;
+            }
+        }
+
         if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
             i += 2;
             while i < bytes.len() && bytes[i] != b'm' {
@@ -2935,6 +3021,12 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
     // Make each line self-contained so viewport slicing preserves styling.
     lines = make_lines_self_contained(&lines);
 
+    let marker_positions = extract_occurrence_positions(&lines);
+    lines = lines
+        .into_iter()
+        .map(|line| strip_occurrence_markers(&line))
+        .collect();
+
     // Build plain-text mirror.
     let plain: Vec<String> = lines
         .iter()
@@ -2943,8 +3035,16 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
 
     // Remap heading line indices.
     remap_heading_lines(&mut ctx.headings, &plain);
-    let link_occurrences = map_link_occurrences(&ctx.link_occurrences, &plain);
-    let file_ref_occurrences = map_file_ref_occurrences(&ctx.file_ref_occurrences, &plain);
+    let link_occurrences = map_marked_link_occurrences(
+        &ctx.link_occurrences,
+        &marker_positions.link_positions,
+        &plain,
+    );
+    let file_ref_occurrences = map_marked_file_ref_occurrences(
+        &ctx.file_ref_occurrences,
+        &marker_positions.file_ref_positions,
+        &plain,
+    );
 
     // Merge links from metadata extraction with those found during rendering.
     let mut all_links = ctx.links.clone();
@@ -2968,6 +3068,182 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         file_refs: ctx.file_refs,
         file_ref_occurrences,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OccurrencePosition {
+    line: usize,
+    start_col: usize,
+    end_col: usize,
+}
+
+#[derive(Debug, Default)]
+struct OccurrencePositions {
+    link_positions: Vec<Option<OccurrencePosition>>,
+    file_ref_positions: Vec<Option<OccurrencePosition>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct OccurrenceKey {
+    kind: char,
+    index: usize,
+}
+
+fn strip_occurrence_markers(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if ch == OCCURRENCE_MARKER_START {
+            while let Some((_, c)) = chars.next() {
+                if c == OCCURRENCE_MARKER_END {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn extract_occurrence_positions(lines: &[String]) -> OccurrencePositions {
+    let mut clean_line_widths = Vec::with_capacity(lines.len());
+    let mut starts: HashMap<OccurrenceKey, (usize, usize)> = HashMap::new();
+    let mut ends: HashMap<OccurrenceKey, (usize, usize)> = HashMap::new();
+
+    for (line_index, line) in lines.iter().enumerate() {
+        let plain = strip_ansi_preserving_occurrence_markers(line);
+        let mut col = 0usize;
+        let mut chars = plain.char_indices().peekable();
+        while let Some((_, ch)) = chars.next() {
+            if ch == OCCURRENCE_MARKER_START {
+                let mut marker = String::new();
+                while let Some((_, c)) = chars.next() {
+                    if c == OCCURRENCE_MARKER_END {
+                        break;
+                    }
+                    marker.push(c);
+                }
+                if let Some((key, edge)) = parse_occurrence_marker(&marker) {
+                    match edge {
+                        OCCURRENCE_START => {
+                            starts.entry(key).or_insert((line_index, col));
+                        }
+                        OCCURRENCE_END => {
+                            ends.entry(key).or_insert((line_index, col));
+                        }
+                        _ => {}
+                    }
+                }
+            } else {
+                col += UnicodeWidthStr::width(ch.to_string().as_str());
+            }
+        }
+        clean_line_widths.push(col);
+    }
+
+    let mut positions = OccurrencePositions::default();
+    for (key, (start_line, start_col)) in starts {
+        let end = ends.get(&key).copied();
+        let end_col = match end {
+            Some((end_line, end_col)) if end_line == start_line => end_col,
+            Some(_) | None => clean_line_widths
+                .get(start_line)
+                .copied()
+                .unwrap_or(start_col)
+                .max(start_col),
+        };
+        let position = OccurrencePosition {
+            line: start_line,
+            start_col,
+            end_col: end_col.max(start_col),
+        };
+        if position.end_col <= position.start_col {
+            continue;
+        }
+        match key.kind {
+            OCCURRENCE_LINK => {
+                if positions.link_positions.len() <= key.index {
+                    positions.link_positions.resize(key.index + 1, None);
+                }
+                positions.link_positions[key.index] = Some(position);
+            }
+            OCCURRENCE_FILE_REF => {
+                if positions.file_ref_positions.len() <= key.index {
+                    positions.file_ref_positions.resize(key.index + 1, None);
+                }
+                positions.file_ref_positions[key.index] = Some(position);
+            }
+            _ => {}
+        }
+    }
+
+    positions
+}
+
+fn parse_occurrence_marker(marker: &str) -> Option<(OccurrenceKey, char)> {
+    let mut chars = marker.chars();
+    let kind = chars.next()?;
+    let edge = chars.next()?;
+    if !matches!(kind, OCCURRENCE_LINK | OCCURRENCE_FILE_REF)
+        || !matches!(edge, OCCURRENCE_START | OCCURRENCE_END)
+    {
+        return None;
+    }
+    let index = chars.as_str().parse::<usize>().ok()?;
+    Some((OccurrenceKey { kind, index }, edge))
+}
+
+fn map_marked_link_occurrences(
+    occurrences: &[Link],
+    positions: &[Option<OccurrencePosition>],
+    plain: &[String],
+) -> Vec<LinkOccurrence> {
+    let fallback = OnceLock::new();
+    occurrences
+        .iter()
+        .enumerate()
+        .filter_map(|(index, link)| {
+            if let Some(Some(position)) = positions.get(index) {
+                return Some(LinkOccurrence {
+                    link: link.clone(),
+                    line: position.line,
+                    start_col: position.start_col,
+                    end_col: position.end_col,
+                });
+            }
+            fallback
+                .get_or_init(|| map_link_occurrences(occurrences, plain))
+                .get(index)
+                .cloned()
+        })
+        .collect()
+}
+
+fn map_marked_file_ref_occurrences(
+    occurrences: &[FileRef],
+    positions: &[Option<OccurrencePosition>],
+    plain: &[String],
+) -> Vec<FileRefOccurrence> {
+    let fallback = OnceLock::new();
+    occurrences
+        .iter()
+        .enumerate()
+        .filter_map(|(index, file_ref)| {
+            if let Some(Some(position)) = positions.get(index) {
+                return Some(FileRefOccurrence {
+                    file_ref: file_ref.clone(),
+                    line: position.line,
+                    start_col: position.start_col,
+                    end_col: position.end_col,
+                });
+            }
+            fallback
+                .get_or_init(|| map_file_ref_occurrences(occurrences, plain))
+                .get(index)
+                .cloned()
+        })
+        .collect()
 }
 
 fn map_link_occurrences(occurrences: &[Link], plain: &[String]) -> Vec<LinkOccurrence> {
@@ -3549,6 +3825,73 @@ mod tests {
             .link_occurrences
             .iter()
             .all(|occurrence| occurrence.end_col > occurrence.start_col));
+    }
+
+    #[test]
+    fn table_link_occurrence_uses_rendered_target_not_earlier_matching_text() {
+        let label = "RegisterFromBusinessInvitationUseCase";
+        let content = format!(
+            r#"
+| Original concern | Evidence |
+|---|---|
+| `{label}` created the user before validation. | [{label}](https://example.com/register) validation evidence |
+"#
+        );
+
+        let result = render_with_viewport(&content, 140, 140);
+        let occurrence = result
+            .link_occurrences
+            .first()
+            .expect("link occurrence should be mapped");
+        let line = &result.plain[occurrence.line];
+        let first = line.find(label).expect("earlier text should render");
+        let second = line.rfind(label).expect("link label should render");
+
+        assert_ne!(
+            first, second,
+            "test must contain matching text before the link"
+        );
+        assert_eq!(
+            occurrence.start_col,
+            UnicodeWidthStr::width(&line[..second]),
+            "link hint should anchor to the rendered link target, not matching text in an earlier cell: {line}"
+        );
+        assert!(!result.rendered.contains(OCCURRENCE_MARKER_START));
+        assert!(!result.plain.join("\n").contains(OCCURRENCE_MARKER_START));
+    }
+
+    #[test]
+    fn table_file_ref_occurrence_uses_rendered_target_not_earlier_matching_text() {
+        let label = "resolved name guard";
+        let chip = format!("↪{label}");
+        let content = format!(
+            r#"
+| Original concern | Evidence |
+|---|---|
+| `{chip}` appears in prose before the real file ref. | @file[{label}](/tmp/RegisterFromBusinessInvitationUseCase.ts:78) |
+"#
+        );
+
+        let result = render_with_viewport(&content, 140, 140);
+        let occurrence = result
+            .file_ref_occurrences
+            .first()
+            .expect("file-ref occurrence should be mapped");
+        let line = &result.plain[occurrence.line];
+        let first = line.find(&chip).expect("earlier text should render");
+        let second = line.rfind(&chip).expect("file-ref chip should render");
+
+        assert_ne!(
+            first, second,
+            "test must contain matching text before the file ref"
+        );
+        assert_eq!(
+            occurrence.start_col,
+            UnicodeWidthStr::width(&line[..second]),
+            "file hint should anchor to the rendered file ref, not matching text in an earlier cell: {line}"
+        );
+        assert!(!result.rendered.contains(OCCURRENCE_MARKER_START));
+        assert!(!result.plain.join("\n").contains(OCCURRENCE_MARKER_START));
     }
 
     #[test]
