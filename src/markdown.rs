@@ -28,6 +28,18 @@ pub struct Link {
     pub href: String,
 }
 
+/// A rendered occurrence of a link in the markdown output.
+#[derive(Debug, Clone)]
+pub struct LinkOccurrence {
+    pub link: Link,
+    /// Zero-based line index in the rendered plain-text output.
+    pub line: usize,
+    /// Zero-based display column where the rendered link label starts.
+    pub start_col: usize,
+    /// Zero-based display column immediately after the rendered link label.
+    pub end_col: usize,
+}
+
 /// A file reference extracted from the markdown and rendered as a
 /// jump-to-editor chip. Authored as `@file:path[:line[:col]]` (bare) or
 /// `@file[label](path[:line[:col]])` (labeled). Interactive viewers open it.
@@ -47,6 +59,10 @@ pub struct FileRefOccurrence {
     pub file_ref: FileRef,
     /// Zero-based line index in the rendered plain-text output.
     pub line: usize,
+    /// Zero-based display column where the rendered file-ref chip starts.
+    pub start_col: usize,
+    /// Zero-based display column immediately after the rendered file-ref chip.
+    pub end_col: usize,
 }
 
 impl FileRef {
@@ -80,6 +96,7 @@ pub struct RenderResult {
     pub plain: Vec<String>,
     pub headings: Vec<Heading>,
     pub links: Vec<Link>,
+    pub link_occurrences: Vec<LinkOccurrence>,
     pub file_refs: Vec<FileRef>,
     pub file_ref_occurrences: Vec<FileRefOccurrence>,
 }
@@ -824,6 +841,7 @@ fn render_inline(
     text: &str,
     links: &mut Vec<Link>,
     seen_links: &mut HashSet<String>,
+    link_occurrences: &mut Vec<Link>,
     file_refs: &mut Vec<FileRef>,
     seen_file_refs: &mut HashSet<String>,
     file_ref_occurrences: &mut Vec<FileRef>,
@@ -848,8 +866,9 @@ fn render_inline(
         &mut file_chips,
     );
 
-    // 2. Links: [text](url)
-    text = regex_replace_all_with_links(&text, links, seen_links);
+    // 2. Links: [text](url), then bare URLs.
+    text = regex_replace_all_with_links(&text, links, seen_links, link_occurrences);
+    text = replace_bare_urls(&text, links, seen_links, link_occurrences);
 
     // 3. Bold + italic: ***text*** or ___text___
     text = regex_replace_all(&text, r"\*{3}(.+?)\*{3}", |caps: &[&str]| {
@@ -1211,6 +1230,7 @@ fn regex_replace_all_with_links(
     text: &str,
     links: &mut Vec<Link>,
     seen_links: &mut HashSet<String>,
+    link_occurrences: &mut Vec<Link>,
 ) -> String {
     let mut result = String::new();
     let mut remaining = text;
@@ -1226,22 +1246,27 @@ fn regex_replace_all_with_links(
             if after_close.starts_with('(') {
                 if let Some(paren_end) = after_close.find(')') {
                     let href = after_close[1..paren_end].trim();
-                    let trim_label = if label.trim().is_empty() {
-                        href
+                    let trim_label = label.trim();
+                    let display = if trim_label.is_empty() || is_bare_url(trim_label) {
+                        compact_url_label(href)
                     } else {
-                        label.trim()
+                        trim_label.to_string()
                     };
 
-                    let key = format!("{trim_label}|{href}");
-                    if !href.is_empty() && !seen_links.contains(&key) {
-                        seen_links.insert(key);
-                        links.push(Link {
-                            text: trim_label.to_string(),
+                    let key = format!("{display}|{href}");
+                    if !href.is_empty() {
+                        let link = Link {
+                            text: display.clone(),
                             href: href.to_string(),
-                        });
+                        };
+                        link_occurrences.push(link.clone());
+
+                        if seen_links.insert(key) {
+                            links.push(link);
+                        }
                     }
 
-                    result.push_str(&ansi_underline(trim_label));
+                    result.push_str(&ansi_underline(&display));
                     remaining = &after_close[paren_end + 1..];
                     continue;
                 }
@@ -1257,6 +1282,158 @@ fn regex_replace_all_with_links(
     }
     result.push_str(remaining);
     result
+}
+
+fn replace_bare_urls(
+    text: &str,
+    links: &mut Vec<Link>,
+    seen_links: &mut HashSet<String>,
+    link_occurrences: &mut Vec<Link>,
+) -> String {
+    let mut result = String::new();
+    let mut remaining = text;
+
+    while let Some(start) = find_next_url_start(remaining) {
+        result.push_str(&remaining[..start]);
+        let candidate = &remaining[start..];
+        let raw_end = candidate
+            .char_indices()
+            .find(|(_, ch)| is_url_boundary(*ch))
+            .map(|(idx, _)| idx)
+            .unwrap_or(candidate.len());
+        let (href, trailing) = split_trailing_url_punctuation(&candidate[..raw_end]);
+
+        if href.is_empty() {
+            result.push_str(&candidate[..raw_end]);
+            remaining = &candidate[raw_end..];
+            continue;
+        }
+
+        let display = compact_url_label(href);
+        let key = format!("{display}|{href}");
+        let link = Link {
+            text: display.clone(),
+            href: href.to_string(),
+        };
+        link_occurrences.push(link.clone());
+        if seen_links.insert(key) {
+            links.push(link);
+        }
+        result.push_str(&ansi_underline(&display));
+        result.push_str(trailing);
+        remaining = &candidate[raw_end..];
+    }
+
+    result.push_str(remaining);
+    result
+}
+
+fn find_next_url_start(text: &str) -> Option<usize> {
+    match (text.find("https://"), text.find("http://")) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn is_bare_url(text: &str) -> bool {
+    text.starts_with("https://") || text.starts_with("http://")
+}
+
+fn is_url_boundary(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | '"' | '\'')
+}
+
+fn split_trailing_url_punctuation(url: &str) -> (&str, &str) {
+    let mut end = url.len();
+    while end > 0 {
+        let Some(ch) = url[..end].chars().next_back() else {
+            break;
+        };
+        if matches!(ch, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}') {
+            end -= ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    url.split_at(end)
+}
+
+fn compact_url_label(url: &str) -> String {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+        .trim_end_matches('/');
+    let (host, rest) = without_scheme
+        .split_once('/')
+        .unwrap_or((without_scheme, ""));
+    let host = host.strip_prefix("www.").unwrap_or(host);
+
+    let mut label = if host == "github.com" && !rest.is_empty() {
+        compact_github_url_label(rest)
+    } else if rest.is_empty() {
+        format!("↗{host}")
+    } else {
+        let tail = rest
+            .rsplit('/')
+            .find(|part| !part.is_empty())
+            .unwrap_or(rest);
+        let tail = tail
+            .split('#')
+            .next_back()
+            .filter(|part| !part.is_empty())
+            .unwrap_or(tail);
+        format!("↗{host}/…/{}", compact_url_tail(tail))
+    };
+
+    if visible_width(&label) > 18 {
+        label = format!("{}…", truncate_to_width(&label, 17));
+    }
+    label
+}
+
+fn compact_github_url_label(rest: &str) -> String {
+    let fragment = rest.split('#').nth(1);
+    if let Some(fragment) = fragment {
+        if let Some(id) = fragment.strip_prefix("discussion_") {
+            return format!("↗GH#{}", compact_url_tail(id));
+        }
+        return format!("↗GH#{}", compact_url_tail(fragment));
+    }
+
+    let mut parts = rest.split('/');
+    let _owner = parts.next();
+    let _repo = parts.next();
+    match (parts.next(), parts.next()) {
+        (Some("pull"), Some(pr)) => format!("↗GH#PR{}", compact_url_tail(pr)),
+        (Some("issues"), Some(issue)) => format!("↗GH#{}", compact_url_tail(issue)),
+        _ => "↗GH".to_string(),
+    }
+}
+
+fn compact_url_tail(tail: &str) -> String {
+    let compact = tail
+        .strip_prefix("discussion_")
+        .unwrap_or(tail)
+        .replace('_', "-");
+    if visible_width(&compact) > 8 {
+        let mut start = compact.chars().take(3).collect::<String>();
+        start.push('…');
+        let end = compact
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        start.push_str(&end);
+        start
+    } else {
+        compact
+    }
 }
 
 /// Strip inline markdown syntax for plain text extraction.
@@ -1920,6 +2097,7 @@ struct RenderContext {
     viewport_width: usize,
     links: Vec<Link>,
     seen_links: HashSet<String>,
+    link_occurrences: Vec<Link>,
     file_refs: Vec<FileRef>,
     seen_file_refs: HashSet<String>,
     file_ref_occurrences: Vec<FileRef>,
@@ -1958,6 +2136,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     text,
                     &mut ctx.links,
                     &mut ctx.seen_links,
+                    &mut ctx.link_occurrences,
                     &mut ctx.file_refs,
                     &mut ctx.seen_file_refs,
                     &mut ctx.file_ref_occurrences,
@@ -1983,6 +2162,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                         item,
                         &mut ctx.links,
                         &mut ctx.seen_links,
+                        &mut ctx.link_occurrences,
                         &mut ctx.file_refs,
                         &mut ctx.seen_file_refs,
                         &mut ctx.file_ref_occurrences,
@@ -2017,6 +2197,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                             bq_line,
                             &mut ctx.links,
                             &mut ctx.seen_links,
+                            &mut ctx.link_occurrences,
                             &mut ctx.file_refs,
                             &mut ctx.seen_file_refs,
                             &mut ctx.file_ref_occurrences,
@@ -2101,6 +2282,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
                 h,
                 &mut ctx.links,
                 &mut ctx.seen_links,
+                &mut ctx.link_occurrences,
                 &mut ctx.file_refs,
                 &mut ctx.seen_file_refs,
                 &mut ctx.file_ref_occurrences,
@@ -2117,6 +2299,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
                         text,
                         &mut ctx.links,
                         &mut ctx.seen_links,
+                        &mut ctx.link_occurrences,
                         &mut ctx.file_refs,
                         &mut ctx.seen_file_refs,
                         &mut ctx.file_ref_occurrences,
@@ -2128,10 +2311,15 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
 
     // Compute column widths from VISIBLE width of rendered content
     let mut col_widths: Vec<usize> = rendered_headers.iter().map(|h| visible_width(h)).collect();
+    let mut min_col_widths: Vec<usize> = rendered_headers
+        .iter()
+        .map(|h| longest_unbreakable_width(h).max(3))
+        .collect();
     for row in &rendered_rows {
         for (c, cell) in row.iter().enumerate() {
             if c < col_widths.len() {
                 col_widths[c] = col_widths[c].max(visible_width(cell));
+                min_col_widths[c] = min_col_widths[c].max(longest_unbreakable_width(cell).max(3));
             }
         }
     }
@@ -2142,7 +2330,7 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     let total = col_widths.iter().sum::<usize>() + border_overhead + padding_overhead;
     if total > ctx.viewport_width && ctx.viewport_width > border_overhead + padding_overhead {
         let avail = ctx.viewport_width - border_overhead - padding_overhead;
-        shrink_col_widths_to_fit(&mut col_widths, avail, 3);
+        shrink_col_widths_to_fit(&mut col_widths, avail, &min_col_widths);
     }
 
     let mut out = Vec::new();
@@ -2206,21 +2394,40 @@ fn render_table(headers: &[String], rows: &[Vec<String>], ctx: &mut RenderContex
     out
 }
 
-fn shrink_col_widths_to_fit(col_widths: &mut [usize], avail: usize, min_width: usize) {
+fn longest_unbreakable_width(text: &str) -> usize {
+    split_words(text)
+        .iter()
+        .map(|word| visible_width(word))
+        .max()
+        .unwrap_or(0)
+}
+
+fn shrink_col_widths_to_fit(col_widths: &mut [usize], avail: usize, min_widths: &[usize]) {
     let content_total: usize = col_widths.iter().sum();
     if content_total == 0 {
         return;
     }
 
+    let fallback_mins;
+    let min_widths = if min_widths.iter().sum::<usize>() <= avail {
+        min_widths
+    } else {
+        fallback_mins = vec![1; col_widths.len()];
+        &fallback_mins
+    };
+
     for w in col_widths.iter_mut() {
-        *w = (*w * avail / content_total).max(min_width);
+        *w = *w * avail / content_total;
+    }
+    for (idx, w) in col_widths.iter_mut().enumerate() {
+        *w = (*w).max(min_widths.get(idx).copied().unwrap_or(3));
     }
 
     while col_widths.iter().sum::<usize>() > avail {
         if let Some((idx, _)) = col_widths
             .iter()
             .enumerate()
-            .filter(|(_, w)| **w > min_width)
+            .filter(|(idx, w)| **w > min_widths.get(*idx).copied().unwrap_or(3))
             .max_by_key(|(_, w)| **w)
         {
             col_widths[idx] -= 1;
@@ -2704,6 +2911,7 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         viewport_width,
         links: Vec::new(),
         seen_links: HashSet::new(),
+        link_occurrences: Vec::new(),
         file_refs: Vec::new(),
         seen_file_refs: HashSet::new(),
         file_ref_occurrences: Vec::new(),
@@ -2735,6 +2943,7 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
 
     // Remap heading line indices.
     remap_heading_lines(&mut ctx.headings, &plain);
+    let link_occurrences = map_link_occurrences(&ctx.link_occurrences, &plain);
     let file_ref_occurrences = map_file_ref_occurrences(&ctx.file_ref_occurrences, &plain);
 
     // Merge links from metadata extraction with those found during rendering.
@@ -2755,9 +2964,112 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
         plain,
         headings: ctx.headings,
         links: all_links,
+        link_occurrences,
         file_refs: ctx.file_refs,
         file_ref_occurrences,
     }
+}
+
+fn map_link_occurrences(occurrences: &[Link], plain: &[String]) -> Vec<LinkOccurrence> {
+    let mut mapped = Vec::with_capacity(occurrences.len());
+    let mut consumed_by_needle: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut search_start = 0usize;
+
+    for link in occurrences {
+        let needle = link.text.trim();
+        if needle.is_empty() {
+            continue;
+        }
+        let candidates = link_match_candidates(needle);
+
+        let mut found = None;
+
+        for (line_index, line) in plain.iter().enumerate().skip(search_start) {
+            if let Some((candidate, start_col, end_col)) =
+                find_link_match_columns(line, &candidates, &mut consumed_by_needle, line_index)
+            {
+                found = Some((line_index, candidate, start_col, end_col));
+                search_start = line_index;
+                break;
+            }
+        }
+
+        if found.is_none() {
+            for (line_index, line) in plain.iter().enumerate() {
+                if let Some((candidate, start_col, end_col)) =
+                    find_link_match_columns(line, &candidates, &mut consumed_by_needle, line_index)
+                {
+                    found = Some((line_index, candidate, start_col, end_col));
+                    break;
+                }
+            }
+        }
+
+        if let Some((line, _, start_col, end_col)) = found {
+            mapped.push(LinkOccurrence {
+                link: link.clone(),
+                line,
+                start_col,
+                end_col,
+            });
+        }
+    }
+
+    mapped
+}
+
+fn find_link_match_columns(
+    line: &str,
+    candidates: &[String],
+    consumed_by_needle: &mut HashMap<String, Vec<usize>>,
+    line_index: usize,
+) -> Option<(String, usize, usize)> {
+    for candidate in candidates {
+        let consumed_by_line = consumed_by_needle
+            .entry(candidate.clone())
+            .or_insert_with(|| vec![0usize; line_index + 1]);
+        if consumed_by_line.len() <= line_index {
+            consumed_by_line.resize(line_index + 1, 0);
+        }
+
+        if let Some((start_col, end_col)) =
+            nth_match_columns(line, candidate, consumed_by_line[line_index])
+        {
+            consumed_by_line[line_index] += 1;
+            return Some((candidate.clone(), start_col, end_col));
+        }
+    }
+
+    None
+}
+
+fn link_match_candidates(label: &str) -> Vec<String> {
+    let mut candidates = vec![label.to_string()];
+    let words: Vec<&str> = label.split_whitespace().collect();
+    for len in (1..words.len()).rev() {
+        let candidate = words[..len].join(" ");
+        if UnicodeWidthStr::width(candidate.as_str()) >= 4 {
+            candidates.push(candidate);
+        }
+    }
+    if label.starts_with('↪') {
+        if let Some(first_word) = words.first() {
+            let candidate = (*first_word).to_string();
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
+}
+
+fn nth_match_columns(line: &str, needle: &str, occurrence: usize) -> Option<(usize, usize)> {
+    let (start, _) = line.match_indices(needle).nth(occurrence)?;
+    let end = start + needle.len();
+    Some((
+        UnicodeWidthStr::width(&line[..start]),
+        UnicodeWidthStr::width(&line[..end]),
+    ))
 }
 
 fn map_file_ref_occurrences(occurrences: &[FileRef], plain: &[String]) -> Vec<FileRefOccurrence> {
@@ -2767,16 +3079,14 @@ fn map_file_ref_occurrences(occurrences: &[FileRef], plain: &[String]) -> Vec<Fi
 
     for file_ref in occurrences {
         let needle = format!("↪{}", file_ref.display());
-        let consumed_by_line = consumed_by_needle
-            .entry(needle.clone())
-            .or_insert_with(|| vec![0usize; plain.len()]);
+        let candidates = link_match_candidates(&needle);
         let mut found = None;
 
         for (line_index, line) in plain.iter().enumerate().skip(search_start) {
-            let count = line.matches(&needle).count();
-            if consumed_by_line[line_index] < count {
-                found = Some(line_index);
-                consumed_by_line[line_index] += 1;
+            if let Some((_, start_col, end_col)) =
+                find_link_match_columns(line, &candidates, &mut consumed_by_needle, line_index)
+            {
+                found = Some((line_index, start_col, end_col));
                 search_start = line_index;
                 break;
             }
@@ -2784,19 +3094,21 @@ fn map_file_ref_occurrences(occurrences: &[FileRef], plain: &[String]) -> Vec<Fi
 
         if found.is_none() {
             for (line_index, line) in plain.iter().enumerate() {
-                let count = line.matches(&needle).count();
-                if consumed_by_line[line_index] < count {
-                    found = Some(line_index);
-                    consumed_by_line[line_index] += 1;
+                if let Some((_, start_col, end_col)) =
+                    find_link_match_columns(line, &candidates, &mut consumed_by_needle, line_index)
+                {
+                    found = Some((line_index, start_col, end_col));
                     break;
                 }
             }
         }
 
-        if let Some(line) = found {
+        if let Some((line, start_col, end_col)) = found {
             mapped.push(FileRefOccurrence {
                 file_ref: file_ref.clone(),
                 line,
+                start_col,
+                end_col,
             });
         }
     }
@@ -3130,6 +3442,11 @@ mod tests {
         assert_eq!(result.file_refs[0].label, None);
         assert_eq!(result.file_ref_occurrences[0].file_ref.path, "src/store.rs");
         assert_eq!(result.file_ref_occurrences[0].line, 0);
+        assert_eq!(result.file_ref_occurrences[0].start_col, "See ".len());
+        assert_eq!(
+            result.file_ref_occurrences[0].end_col,
+            "See ↪store.rs:1290".chars().count()
+        );
         let plain = result.plain.join("\n");
         // Bare chip shows the basename, not the full path.
         assert!(plain.contains("↪store.rs:1290"), "chip rendered: {plain}");
@@ -3151,6 +3468,153 @@ mod tests {
         let plain = result.plain.join("\n");
         assert!(plain.contains("↪the store"), "chip shows label: {plain}");
         assert!(!plain.contains("@file"), "token consumed: {plain}");
+    }
+
+    #[test]
+    fn bare_urls_render_as_compact_links() {
+        let url =
+            "https://github.com/xepelinapp/xepelin-client-global/pull/4839#discussion_r3469081382";
+        let result = render(&format!("Comment {url}"), 48);
+
+        assert_eq!(result.links.len(), 1);
+        assert_eq!(result.links[0].href, url);
+        assert_eq!(result.links[0].text, "↗GH#r34…1382");
+        assert_eq!(result.link_occurrences.len(), 1);
+        assert_eq!(result.link_occurrences[0].link.href, url);
+        assert_eq!(result.link_occurrences[0].line, 0);
+        assert_eq!(result.link_occurrences[0].start_col, "Comment ".len());
+        assert_eq!(
+            result.link_occurrences[0].end_col,
+            "Comment ↗GH#r34…1382".chars().count()
+        );
+
+        let plain = result.plain.join("\n");
+        assert!(
+            !plain.contains("https://github.com"),
+            "raw wrapped URL should not be rendered: {plain}"
+        );
+        assert!(
+            plain.contains("↗GH#r34…1382"),
+            "compact link label should render: {plain}"
+        );
+    }
+
+    #[test]
+    fn repeated_links_preserve_rendered_occurrences() {
+        let url = "https://github.com/owner/repo/pull/12#discussion_r123456";
+        let result = render(&format!("{url}\n\nagain {url}"), 80);
+
+        assert_eq!(result.links.len(), 1);
+        assert_eq!(result.link_occurrences.len(), 2);
+        assert_eq!(result.link_occurrences[0].link.href, url);
+        assert_eq!(result.link_occurrences[1].link.href, url);
+        assert_eq!(
+            result
+                .link_occurrences
+                .iter()
+                .map(|occurrence| occurrence.line)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(result.link_occurrences[0].start_col, 0);
+        assert_eq!(result.link_occurrences[1].start_col, "again ".len());
+    }
+
+    #[test]
+    fn wrapped_table_link_labels_preserve_occurrences() {
+        let content = r#"
+| Evidence |
+| --- |
+| [$first evidence label with many words](https://example.com/first), [$second evidence label with many words](https://example.com/second) |
+"#;
+
+        let result = render_with_viewport(content, 44, 44);
+        let plain = result.plain.join("\n");
+
+        assert_eq!(result.links.len(), 2);
+        assert_eq!(
+            result.link_occurrences.len(),
+            2,
+            "wrapped link labels should still be reachable by hint mode: {plain}"
+        );
+        assert_eq!(
+            result
+                .link_occurrences
+                .iter()
+                .map(|occurrence| occurrence.link.href.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://example.com/first", "https://example.com/second"]
+        );
+        assert!(result
+            .link_occurrences
+            .iter()
+            .all(|occurrence| occurrence.end_col > occurrence.start_col));
+    }
+
+    #[test]
+    fn auth142_wrapped_table_file_ref_labels_preserve_occurrences() {
+        let content = r#"
+| Comment | Original concern | Decision and local status | Evidence |
+|---|---|---|---|
+| https://github.com/xepelinapp/xepelin-client-application/pull/1184#discussion_r3469082289 | `firstName ?? invitation.firstName` and `lastName ?? invitation.lastName` allowed empty strings to override invitation names. | Valid. Implemented by requiring non-empty values when optional fields are present and by trimming at the domain boundary before choosing the form name over the invitation fallback. | @file[DTO non-empty optional names](/Users/raulsaavedra/Projects/xepelin/xepelin-client-application/.worktrees/AUTH-142/apps/bff/src/modules/auth/dto/accept-invitation-request-dto.ts:28), @file[BFF name trimming](/Users/raulsaavedra/Projects/xepelin/xepelin-client-application/.worktrees/AUTH-142/apps/bff/src/modules/auth/auth.domain-service.ts:770), @file[whitespace-name test](/Users/raulsaavedra/Projects/xepelin/xepelin-client-application/.worktrees/AUTH-142/apps/bff/src/modules/auth/auth.domain-service.accept-invitation.spec.ts:102) |
+"#;
+
+        let result = render_with_viewport(content, 110, 110);
+        let plain = result.plain.join("\n");
+
+        assert_eq!(result.file_refs.len(), 3);
+        assert_eq!(
+            result.file_ref_occurrences.len(),
+            3,
+            "AUTH-142 wrapped evidence refs should all remain reachable by f hints: {plain}"
+        );
+        assert_eq!(
+            result
+                .file_ref_occurrences
+                .iter()
+                .map(|occurrence| occurrence.file_ref.label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("DTO non-empty optional names"),
+                Some("BFF name trimming"),
+                Some("whitespace-name test")
+            ]
+        );
+        assert!(result
+            .file_ref_occurrences
+            .iter()
+            .all(|occurrence| occurrence.end_col > occurrence.start_col));
+    }
+
+    #[test]
+    fn auth142_viewport_edge_file_ref_label_preserves_occurrence() {
+        let content = r#"
+| Comment | Original concern | Decision and local status | Evidence |
+|---|---|---|---|
+| https://github.com/xepelinapp/xepelin-server-global/pull/5996#discussion_r3469083101 | `RegisterFromBusinessInvitationUseCase` accepts a form-provided name without matching the invited name, and the legacy path can still arrive with no form name while the invitation row has an empty `receiverName`. | Partially implemented. The empty-name create path now fails before `createUser`, which prevents a worse half-created user. It does not make the legacy flag-off acceptance path succeed when v3 invitation creation stored an empty name. The name-matching concern is rejected for the new flow because v3 invitation creation no longer asks the inviter for the invited user's name; the acceptance form is the source for the invited user's real name. | @file[empty-name guard](/Users/raulsaavedra/Projects/xepelin/xepelin-server-global/.worktrees/AUTH-142/src/features/business/users/useCases/RegisterFromBusinessInvitationUseCase.ts:78), @file[empty-name test](/Users/raulsaavedra/Projects/xepelin/xepelin-server-global/.worktrees/AUTH-142/test/unit/features/business/users/useCases/RegisterFromBusinessInvitationUseCase.spec.ts:148), @file[v3 invitation sends empty name](/Users/raulsaavedra/Projects/xepelin/xepelin-client-global/.worktrees/AUTH-142/src/modules/user-profile/users-management-v3/services/create-invitation.ts:9) |
+"#;
+
+        let result = render_with_viewport(content, 170, 170);
+        let plain = result.plain.join("\n");
+
+        assert_eq!(result.file_refs.len(), 3);
+        assert_eq!(
+            result.file_ref_occurrences.len(),
+            3,
+            "AUTH-142 viewport-edge file ref should remain reachable by f hints: {plain}"
+        );
+        assert_eq!(
+            result
+                .file_ref_occurrences
+                .iter()
+                .map(|occurrence| occurrence.file_ref.label.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("empty-name guard"),
+                Some("empty-name test"),
+                Some("v3 invitation sends empty name")
+            ]
+        );
     }
 
     #[test]
@@ -3211,13 +3675,13 @@ mod tests {
                 .any(|line| line.contains("BusinessInvitation")),
             "expected wrapped table output to preserve code-span content"
         );
-        assert!(
-            result
-                .plain
-                .iter()
-                .any(|line| line.contains("link/token y envía el email.")),
-            "expected long proposal cell text to continue on a later wrapped line"
-        );
+        let rendered_plain = result.plain.join("\n");
+        for expected in ["link/token", "envía", "email."] {
+            assert!(
+                rendered_plain.contains(expected),
+                "expected long proposal cell token {expected:?} to be preserved"
+            );
+        }
         assert!(
             result
                 .plain
@@ -3234,6 +3698,39 @@ mod tests {
         assert!(
             result.plain.iter().any(|line| line.starts_with("├")),
             "expected wrapped tables to include row separators for readability"
+        );
+    }
+
+    #[test]
+    fn tables_render_bare_urls_without_splitting_the_href_text() {
+        let url =
+            "https://github.com/xepelinapp/xepelin-client-global/pull/4839#discussion_r3469081382";
+        let content = format!(
+            r#"
+| Comment | Decision |
+| --- | --- |
+| {url} | Valid. Preserves backend message and submitted credentials. |
+"#
+        );
+
+        let result = render_with_viewport(&content, 72, 72);
+        let plain = result.plain.join("\n");
+
+        assert_eq!(result.links.len(), 1);
+        assert_eq!(result.links[0].href, url);
+        assert_eq!(result.link_occurrences.len(), 1);
+        assert_eq!(result.link_occurrences[0].link.href, url);
+        assert!(
+            !plain.contains("https://github.com/xepelinapp/xepelin-client-global"),
+            "table should not render a partial raw URL: {plain}"
+        );
+        assert!(
+            plain.contains("↗GH#r34…1382"),
+            "table should render the compact link label: {plain}"
+        );
+        assert!(
+            result.lines.iter().all(|line| visible_width(line) <= 72),
+            "expected rendered table lines to fit the viewport"
         );
     }
 }
