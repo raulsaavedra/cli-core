@@ -115,7 +115,7 @@ fn minimum_channel_width(model: &Model) -> usize {
             .collect();
         let labeled = active
             .iter()
-            .filter(|edge| model.nodes[edge.from].rank == channel && edge.label.is_some())
+            .filter(|edge| model.nodes[edge.to].rank == channel + 1 && edge.label.is_some())
             .count();
         if labeled == 0 {
             continue;

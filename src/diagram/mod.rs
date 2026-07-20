@@ -168,17 +168,6 @@ mod tests {
         }"#
     }
 
-    fn assert_caption_attached(lines: &[String], prefix: &str) {
-        let line = lines
-            .iter()
-            .find(|line| line.contains(prefix))
-            .unwrap_or_else(|| panic!("rendered diagram is missing caption `{prefix}`"));
-        assert!(
-            line.contains("├─") || line.contains("─┤"),
-            "caption `{prefix}` should attach directly to its relationship branch"
-        );
-    }
-
     fn normalized_text(lines: &[String]) -> String {
         lines
             .join(" ")
@@ -271,30 +260,29 @@ mod tests {
     }
 
     #[test]
-    fn dual_bundles_keep_every_relationship_caption_attached() {
+    fn dual_bundles_render_every_relationship_caption() {
         let rendered = render_json_in(dual_bundle_src(), 120)
             .expect("dual source and target bundles should route without false junctions");
         let lines: Vec<String> = rendered.lines.iter().map(|line| strip_ansi(line)).collect();
         let text = normalized_text(&lines);
 
-        for (label, prefix) in [
-            ("incoming request", "incoming"),
-            ("direct management", "direct"),
-            ("delegated access", "delegated"),
-            ("account operation", "account"),
-            ("domain operation", "domain"),
-            ("identity state", "identity"),
-            ("access policy", "access"),
-            ("state projection", "state"),
+        for label in [
+            "incoming request",
+            "direct management",
+            "delegated access",
+            "account operation",
+            "domain operation",
+            "identity state",
+            "access policy",
+            "state projection",
         ] {
             assert_words_rendered(&text, label);
-            assert_caption_attached(&lines, prefix);
         }
         assert!(text.contains('┄') || text.contains('┆'));
     }
 
     #[test]
-    fn descriptive_branches_use_attached_wrapped_captions() {
+    fn descriptive_branches_render_wrapped_captions() {
         let rendered = render_json_in(descriptive_bundles_src(), 120)
             .expect("descriptive branch labels should participate in layout");
         let lines = rendered
@@ -304,18 +292,17 @@ mod tests {
             .collect::<Vec<_>>();
         let text = normalized_text(&lines);
 
-        for (label, prefix) in [
-            ("invoke semantic operation", "semantic"),
-            ("invoke management operation", "management"),
-            ("forward identity and action", "identity"),
-            ("forward lifecycle operation", "lifecycle"),
-            ("persist ownership metadata", "persist"),
-            ("start or stop managed runtime", "start"),
-            ("open command transport", "open"),
-            ("inspect and control target", "inspect"),
+        for label in [
+            "invoke semantic operation",
+            "invoke management operation",
+            "forward identity and action",
+            "forward lifecycle operation",
+            "persist ownership metadata",
+            "start or stop managed runtime",
+            "open command transport",
+            "inspect and control target",
         ] {
             assert_words_rendered(&text, label);
-            assert_caption_attached(&lines, prefix);
         }
         assert_eq!(rendered.graph_width, 120);
     }
@@ -343,6 +330,16 @@ mod tests {
             "long edge still lands exactly one arrow"
         );
         assert!(text.contains("┆"), "async edge renders dashed");
+        let lines = text.lines().collect::<Vec<_>>();
+        let middle_rank = lines.iter().position(|line| line.contains("BFF")).unwrap();
+        let caption = lines
+            .iter()
+            .position(|line| line.contains("raw copy"))
+            .unwrap();
+        assert!(
+            caption > middle_rank,
+            "a long relationship label belongs to its destination channel"
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 //! Local orthogonal routing between adjacent node ranks.
 //!
 //! Every channel has three visual regions: source-side split buses, a vertical
-//! branch field, and target-side merge buses. Edge labels are wrapped captions
-//! attached directly to their branch with a tee.
+//! branch field, and target-side merge buses. A labeled relationship uses its
+//! final branch as an inline caption track before reaching the target-side bus.
 
 use std::collections::{HashMap, HashSet};
 
@@ -161,7 +161,7 @@ pub(super) fn route(
                 sx: 0,
                 tx: 0,
                 anchor: 0,
-                label: if channel == source_rank {
+                label: if channel + 1 == target_rank {
                     edge.label.clone()
                 } else {
                     None
@@ -457,17 +457,12 @@ fn assign_bus_lanes(segments: &[Segment], source_side: bool) -> (HashMap<BundleK
     (assigned, lanes.len())
 }
 
-#[derive(Clone, Copy)]
-enum CaptionSide {
-    Left,
-    Right,
-}
-
 struct Caption {
     segment: usize,
-    side: CaptionSide,
     lines: Vec<String>,
     row: usize,
+    x: usize,
+    width: usize,
     lo: usize,
     hi: usize,
 }
@@ -479,7 +474,6 @@ fn plan_captions(
     let mut anchors: Vec<usize> = segments.iter().map(|segment| segment.anchor).collect();
     anchors.sort_unstable();
     anchors.dedup();
-    let graph_center = width / 2;
     let mut captions = Vec::new();
 
     for (segment_index, segment) in segments.iter().enumerate() {
@@ -499,21 +493,7 @@ fn plan_captions(
         } else {
             (segment.anchor + anchors[position + 1]) / 2 - 1
         };
-        let left_room = segment.anchor.saturating_sub(left_boundary + 2);
-        let right_room = right_boundary.saturating_sub(segment.anchor + 2);
-        let left_score = left_room.min(MAX_CAPTION_WIDTH);
-        let right_score = right_room.min(MAX_CAPTION_WIDTH);
-        let side = if left_score > right_score
-            || (left_score == right_score && segment.anchor < graph_center)
-        {
-            CaptionSide::Left
-        } else {
-            CaptionSide::Right
-        };
-        let available = match side {
-            CaptionSide::Left => left_room,
-            CaptionSide::Right => right_room,
-        };
+        let available = right_boundary.saturating_sub(left_boundary) + 1;
         if available < MIN_CAPTION_WIDTH {
             return Err(DiagramError::Routing(format!(
                 "edge label `{label}` needs more branch space"
@@ -525,17 +505,18 @@ fn plan_captions(
             .map(|line| line.chars().count())
             .max()
             .unwrap_or(0);
-        let (lo, hi) = match side {
-            CaptionSide::Left => (segment.anchor - block_width - 2, segment.anchor),
-            CaptionSide::Right => (segment.anchor, segment.anchor + block_width + 2),
-        };
+        let x = segment.anchor.saturating_sub(block_width / 2).clamp(
+            left_boundary,
+            right_boundary.saturating_sub(block_width - 1),
+        );
         captions.push(Caption {
             segment: segment_index,
-            side,
             lines,
             row: 0,
-            lo,
-            hi,
+            x,
+            width: block_width,
+            lo: x,
+            hi: x + block_width - 1,
         });
     }
 
@@ -583,13 +564,18 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
     let (source_lanes, source_lane_count) = assign_bus_lanes(&segments, true);
     let (target_lanes, target_lane_count) = assign_bus_lanes(&segments, false);
     let (captions, caption_height) = plan_captions(&segments, width)?;
+    let caption_by_segment = captions
+        .iter()
+        .enumerate()
+        .map(|(caption, plan)| (plan.segment, caption))
+        .collect::<HashMap<_, _>>();
     let caption_start = source_lane_count + 2;
-    let target_start = caption_start + caption_height + 1;
+    let target_start = caption_start + caption_height + 2;
     let arrow_row = target_start + target_lane_count + 1;
     let height = arrow_row + 1;
 
     let mut strokes = Vec::new();
-    for segment in &segments {
+    for (segment_index, segment) in segments.iter().enumerate() {
         let source_row = source_lanes.get(&segment.source_key()).map(|lane| lane + 1);
         let target_row = target_lanes
             .get(&segment.target_key())
@@ -601,6 +587,14 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
             arrow_row - 1
         };
 
+        let caption = caption_by_segment
+            .get(&segment_index)
+            .map(|caption| &captions[*caption]);
+        let caption_top = caption.map(|caption| caption_start + caption.row);
+        let caption_bottom = caption_top
+            .zip(caption)
+            .map(|(top, caption)| top + caption.lines.len().saturating_sub(1));
+
         let mut points = vec![(segment.sx, 0)];
         if let Some(row) = source_row {
             push_point(&mut points, (segment.sx, row));
@@ -608,13 +602,17 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
         } else {
             debug_assert_eq!(segment.sx, segment.anchor);
         }
-        if let Some(row) = target_row {
-            push_point(&mut points, (segment.anchor, row));
-            push_point(&mut points, (segment.tx, row));
+        if let Some(top) = caption_top {
+            push_point(&mut points, (segment.anchor, top - 1));
         } else {
-            debug_assert_eq!(segment.anchor, segment.tx);
+            if let Some(row) = target_row {
+                push_point(&mut points, (segment.anchor, row));
+                push_point(&mut points, (segment.tx, row));
+            } else {
+                debug_assert_eq!(segment.anchor, segment.tx);
+            }
+            push_point(&mut points, (segment.tx, vertical_end));
         }
-        push_point(&mut points, (segment.tx, vertical_end));
         strokes.push(LocalStroke {
             cells: trace_polyline(&points),
             dashed: segment.dashed(),
@@ -623,32 +621,34 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
             source: segment.source_key(),
             target: segment.target_key(),
         });
+
+        if let Some(bottom) = caption_bottom {
+            let mut points = vec![(segment.anchor, bottom + 1)];
+            if let Some(row) = target_row {
+                push_point(&mut points, (segment.anchor, row));
+                push_point(&mut points, (segment.tx, row));
+            } else {
+                debug_assert_eq!(segment.anchor, segment.tx);
+            }
+            push_point(&mut points, (segment.tx, vertical_end));
+            strokes.push(LocalStroke {
+                cells: trace_polyline(&points),
+                dashed: segment.dashed(),
+                style: segment.style(),
+                edge: segment.edge,
+                source: segment.source_key(),
+                target: segment.target_key(),
+            });
+        }
     }
 
     let mut labels = Vec::new();
     for caption in captions {
-        let segment = &segments[caption.segment];
         let y = caption_start + caption.row;
-        let tee_cells = match caption.side {
-            CaptionSide::Left => vec![(segment.anchor - 1, y, E), (segment.anchor, y, W)],
-            CaptionSide::Right => vec![(segment.anchor, y, E), (segment.anchor + 1, y, W)],
-        };
-        strokes.push(LocalStroke {
-            cells: tee_cells,
-            dashed: segment.dashed(),
-            style: segment.style(),
-            edge: segment.edge,
-            source: segment.source_key(),
-            target: segment.target_key(),
-        });
         for (line, text) in caption.lines.into_iter().enumerate() {
             let text_width = text.chars().count();
-            let x = match caption.side {
-                CaptionSide::Left => segment.anchor - text_width - 2,
-                CaptionSide::Right => segment.anchor + 3,
-            };
             labels.push(LocalLabel {
-                x,
+                x: caption.x + (caption.width - text_width) / 2,
                 y: y + line,
                 text,
             });
@@ -813,5 +813,45 @@ mod tests {
         assign_anchors(&mut segments, 120).expect("tracks should fit");
 
         assert_eq!(segments[0].anchor, 40);
+    }
+
+    #[test]
+    fn inline_caption_interrupts_and_resumes_its_branch() {
+        let anchor = 40;
+        let plan = plan_channel(
+            vec![Segment {
+                edge: 0,
+                from: End::Node(0),
+                to: End::Node(1),
+                sx: anchor,
+                tx: anchor,
+                anchor,
+                label: Some("branch caption".into()),
+                kind: EdgeKind::Sync,
+            }],
+            80,
+        )
+        .expect("an inline caption should fit on a straight branch");
+
+        let caption_top = plan.labels.iter().map(|label| label.y).min().unwrap();
+        let caption_bottom = plan.labels.iter().map(|label| label.y).max().unwrap();
+        let cells = plan
+            .strokes
+            .iter()
+            .flat_map(|stroke| stroke.cells.iter())
+            .collect::<Vec<_>>();
+
+        assert!(cells
+            .iter()
+            .any(|(x, y, mask)| { *x == anchor && *y + 1 == caption_top && *mask & (N | S) != 0 }));
+        assert!(cells.iter().any(|(x, y, mask)| {
+            *x == anchor && *y == caption_bottom + 1 && *mask & (N | S) != 0
+        }));
+        for label in &plan.labels {
+            let label_end = label.x + label.text.chars().count();
+            assert!(cells
+                .iter()
+                .all(|(x, y, _)| *y != label.y || *x < label.x || *x >= label_end));
+        }
     }
 }

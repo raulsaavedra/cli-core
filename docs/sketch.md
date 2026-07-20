@@ -50,9 +50,9 @@ The document describes relationships; the renderer owns their geometry:
   until those territories read clearly; remaining width becomes outer margin.
 - Same-kind relationships that share a source use one split trunk and bus.
   Same-kind relationships that share a target use one merge bus and trunk.
-- Every relationship keeps a vertical branch through the channel. Its label
-  wraps to the branch's available territory and connects to that branch with a
-  visible tee, so text remains spatially tied to the relationship it describes.
+- A relationship label occupies the final branch entering its target. The
+  branch ends above the wrapped italic caption and resumes below it before the
+  target-side merge bus.
 - A relationship that skips authored ranks follows the nearest clear interior
   track through those rank bands. The track stays close to its source and target
   branch.

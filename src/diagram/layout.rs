@@ -2,8 +2,8 @@
 //!
 //! Authored ranks establish vertical stages. Horizontal placement follows the
 //! graph's branch structure, and each channel renders local split buses,
-//! relationship branches, and merge buses. Labels are wrapped captions attached
-//! directly to their branch.
+//! relationship branches, and merge buses. A label occupies the final branch
+//! entering its target; the branch ends above the caption and resumes below it.
 
 mod placement;
 mod routing;
