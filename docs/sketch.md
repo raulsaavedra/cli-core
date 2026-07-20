@@ -45,12 +45,17 @@ The document describes relationships; the renderer owns their geometry:
 
 - Ranks establish vertical order. Nodes within a rank keep their declared order
   and align horizontally from their parent and child relationships.
-- Edges of the same kind that share a source or target use a common fan-out or
-  fan-in trunk. Authors still declare each semantic edge separately.
-- Independent routes reuse horizontal lanes when their intervals do not overlap.
-- Fan-out and fan-in labels occupy a branch band between the shared bus and the
-  corresponding nodes. Each label is centered on the branch it describes, and
-  its text width participates in rank placement before routes are drawn.
+- Edges of the same kind that share an endpoint also share its physical port and
+  trunk. Each declared edge then receives its own connector row, including an
+  edge that belongs to both a fan-out bundle and a fan-in bundle.
+- Labels sit inside their edge's horizontal connector when space permits. A
+  longer label receives a dedicated row immediately above that connector, and
+  its text width participates in layout before anything is drawn.
+- An edge that skips an authored rank travels through a margin gutter instead
+  of crossing through the intervening nodes.
+- Fixed node order can make some routes cross. A `╪` marks two independent
+  routes passing over one another; junction glyphs are reserved for shared
+  endpoint bundles.
 - Connected ranks align around the median center of their neighboring nodes.
   For an even sibling group, the midpoint between the two middle nodes keeps
   the parent centered over the complete group.

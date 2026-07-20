@@ -1,8 +1,9 @@
 //! Styled cell grid: the single render artifact.
 //!
 //! Two write paths with different composition rules:
-//!  - strokes carry a direction mask (N/E/S/W) and *compose* — two strokes
-//!    crossing a cell merge into the correct junction glyph (`┼`, `├`, ...).
+//!  - strokes carry a direction mask (N/E/S/W) and *compose* into junction
+//!    glyphs (`┼`, `├`, ...). Layout can then mark an independent crossing as
+//!    an overpass without changing either route.
 //!  - text writes own their cells outright. A text write landing on an
 //!    occupied cell is a layout bug; debug builds panic, release overwrites.
 //!
@@ -136,6 +137,19 @@ impl Grid {
             mask: 0,
             dashed: false,
         };
+    }
+
+    /// Mark two unrelated routes crossing without connecting. Horizontal
+    /// double and vertical single strokes read as an overpass instead of a
+    /// four-way junction.
+    pub fn crossover(&mut self, x: usize, y: usize) {
+        let i = self.idx(x, y);
+        let cell = &mut self.cells[i];
+        debug_assert!(
+            cell.mask & (N | S) != 0 && cell.mask & (E | W) != 0,
+            "crossover at ({x},{y}) does not contain both axes"
+        );
+        cell.ch = '╪';
     }
 
     /// Blit the grid to ANSI strings — the degenerate, full-extent viewport.

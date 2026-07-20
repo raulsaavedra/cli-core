@@ -60,7 +60,7 @@ pub struct EdgeSpec {
     pub kind: EdgeKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EdgeKind {
     #[default]

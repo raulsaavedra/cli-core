@@ -40,6 +40,9 @@ pub fn paint(scene: &Scene) -> Grid {
             Op::Arrow { x, y } => {
                 grid.arrow(*x, *y, '▼');
             }
+            Op::Crossover { x, y } => {
+                grid.crossover(*x, *y);
+            }
             Op::Text { x, y, text, style } => {
                 grid.text(*x, *y, text, *style);
             }

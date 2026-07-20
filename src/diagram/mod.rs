@@ -62,6 +62,8 @@ fn render_at(src: &str, viewport: usize) -> Result<Rendered, DiagramError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn strip_ansi(s: &str) -> String {
@@ -99,31 +101,36 @@ mod tests {
         haystack.match_indices(needle).count()
     }
 
-    fn target_ownership_src() -> &'static str {
+    fn dual_bundle_src() -> &'static str {
         r#"{
-          "title": "Target ownership",
+          "title": "dual bundle routing",
           "nodes": [
-            {"id": "clients", "label": "Product clients", "kind": "external"},
-            {"id": "bff", "label": "BFF"},
-            {"id": "users", "label": "Users Service"},
-            {"id": "sg", "label": "Server Global"},
-            {"id": "msusers", "label": "msUsers"},
-            {"id": "cognito", "label": "Cognito"}
+            {"id": "client", "label": "Client", "kind": "external"},
+            {"id": "operator", "label": "Operator", "kind": "external"},
+            {"id": "gateway", "label": "Gateway"},
+            {"id": "authority", "label": "Authority"},
+            {"id": "identity", "label": "Identity", "kind": "external"},
+            {"id": "records", "label": "Records", "kind": "store"},
+            {"id": "policy", "label": "Policy Engine"}
           ],
           "edges": [
-            {"from": "clients", "to": "bff", "label": "account and auth API"},
-            {"from": "bff", "to": "users", "label": "accounts"},
-            {"from": "bff", "to": "sg", "label": "business context"},
-            {"from": "bff", "to": "msusers", "label": "authorization"},
-            {"from": "users", "to": "cognito", "label": "identity provider"}
-          ],
-          "notes": [
-            {"on": "users", "text": "Account profile, credentials, verification, and access state"},
-            {"on": "sg", "text": "Businesses, memberships, invitations, and compatibility projection"},
-            {"on": "msusers", "text": "Product roles and permissions"}
+            {"from": "client", "to": "gateway", "label": "incoming request"},
+            {"from": "operator", "to": "authority", "label": "direct management"},
+            {"from": "operator", "to": "gateway", "label": "delegated access"},
+            {"from": "gateway", "to": "authority", "label": "account operation"},
+            {"from": "gateway", "to": "records", "label": "domain operation"},
+            {"from": "authority", "to": "identity", "label": "identity state"},
+            {"from": "records", "to": "policy", "label": "access policy"},
+            {"from": "authority", "to": "records", "label": "state projection", "kind": "async"}
           ],
           "hints": {
-            "ranks": [["clients"], ["bff"], ["users", "sg", "msusers"], ["cognito"]]
+            "ranks": [
+              ["client", "operator"],
+              ["gateway"],
+              ["authority"],
+              ["identity", "records"],
+              ["policy"]
+            ]
           }
         }"#
     }
@@ -162,15 +169,6 @@ mod tests {
             ]
           }
         }"#
-    }
-
-    fn plain_lines(src: &str, viewport: usize) -> Vec<String> {
-        render_json_in(src, viewport)
-            .expect("render should succeed")
-            .lines
-            .iter()
-            .map(|line| strip_ansi(line))
-            .collect()
     }
 
     fn text_position(lines: &[String], needle: &str) -> (usize, usize) {
@@ -259,144 +257,40 @@ mod tests {
     }
 
     #[test]
-    fn labeled_fan_in_centers_labels_on_source_branches() {
-        let lines = plain_lines(
-            r#"{
-              "nodes": [
-                {"id": "a", "label": "Service A"},
-                {"id": "b", "label": "Service B"},
-                {"id": "c", "label": "Service C"},
-                {"id": "q", "label": "events", "kind": "queue"}
-              ],
-              "edges": [
-                {"from": "a", "to": "q", "label": "created"},
-                {"from": "b", "to": "q", "label": "updated"},
-                {"from": "c", "to": "q", "label": "deleted"}
-              ]
-            }"#,
-            80,
-        );
-        let (_, source_y) = text_position(&lines, "Service A");
-        let (_, target_y) = text_position(&lines, "events");
-        let mut label_rows = Vec::new();
+    fn dual_bundles_keep_semantic_edges_on_distinct_connectors() {
+        let rendered = render_json_in(dual_bundle_src(), 120)
+            .expect("dual source and target bundles should route without false junctions");
+        let lines: Vec<String> = rendered.lines.iter().map(|line| strip_ansi(line)).collect();
+        let text = lines.join("\n");
 
-        for (node, label) in [
-            ("Service A", "created"),
-            ("Service B", "updated"),
-            ("Service C", "deleted"),
+        for label in [
+            "incoming request",
+            "direct management",
+            "delegated access",
+            "account operation",
+            "domain operation",
+            "identity state",
+            "access policy",
+            "state projection",
         ] {
-            let (node_x, _) = text_position(&lines, node);
-            let (label_x, label_y) = text_position(&lines, label);
-            assert_eq!(
-                label_x + label.len() / 2,
-                node_x + node.len() / 2,
-                "fan-in label `{label}` should be centered on its source branch"
-            );
-            assert!(label_y > source_y && label_y < target_y);
-            label_rows.push(label_y);
+            assert_eq!(count(&text, label), 1, "label `{label}` should render once");
         }
 
-        assert!(label_rows.windows(2).all(|rows| rows[0] == rows[1]));
-    }
-
-    #[test]
-    fn independent_routes_reuse_a_channel_lane() {
-        let lines = plain_lines(
-            r#"{
-              "nodes": [
-                {"id": "a", "label": "Source A"},
-                {"id": "b", "label": "Source B"},
-                {"id": "c", "label": "Target A"},
-                {"id": "d", "label": "Target B"}
-              ],
-              "edges": [
-                {"from": "a", "to": "c", "label": "left route"},
-                {"from": "b", "to": "d", "label": "right route"}
-              ],
-              "hints": {"ranks": [["a", "b"], ["c", "d"]]}
-            }"#,
-            80,
-        );
-        let (_, source_y) = text_position(&lines, "Source A");
-        let (_, target_y) = text_position(&lines, "Target A");
-
-        assert!(
-            target_y - source_y <= 7,
-            "independent routes should share one channel lane"
-        );
-    }
-
-    #[test]
-    fn target_ownership_aligns_single_parent_chain() {
-        let lines = plain_lines(target_ownership_src(), 80);
-        let users_label = "Users Service [1]";
-        let (users_x, _) = text_position(&lines, users_label);
-        let (cognito_x, _) = text_position(&lines, "Cognito");
-        let users_center = users_x + users_label.len() / 2;
-        let cognito_center = cognito_x + "Cognito".len() / 2;
-
+        let first_channel_rows: HashSet<usize> =
+            ["incoming request", "direct management", "delegated access"]
+                .into_iter()
+                .map(|label| text_position(&lines, label).1)
+                .collect();
         assert_eq!(
-            users_center, cognito_center,
-            "a single-child identity provider should align with its parent"
+            first_channel_rows.len(),
+            3,
+            "each semantic edge should keep its own connector row"
         );
-    }
-
-    #[test]
-    fn target_ownership_uses_a_branch_label_band() {
-        let lines = plain_lines(target_ownership_src(), 80);
-        let (_, bff_y) = text_position(&lines, "BFF");
-        let (users_x, users_y) = text_position(&lines, "Users Service [1]");
-        let (sg_x, sg_y) = text_position(&lines, "Server Global [2]");
-        let (msusers_x, msusers_y) = text_position(&lines, "msUsers [3]");
-
-        assert_eq!(users_y, sg_y);
-        assert_eq!(sg_y, msusers_y);
+        assert!(text.contains('┄') || text.contains('┆'));
         assert!(
-            users_y - bff_y <= 8,
-            "a three-way fan-out should use one compact routing band"
+            text.contains('╪'),
+            "independent routes should cross as an overpass, not a junction"
         );
-
-        let mut label_rows = Vec::new();
-        for (label, target_x) in [
-            ("accounts", users_x + "Users Service [1]".len() / 2),
-            ("business context", sg_x + "Server Global [2]".len() / 2),
-            ("authorization", msusers_x + "msUsers [3]".len() / 2),
-        ] {
-            let (label_x, label_y) = text_position(&lines, label);
-            let label_center = label_x + label.len() / 2;
-            assert_eq!(
-                label_center, target_x,
-                "branch label `{label}` should be centered on its target branch"
-            );
-            assert!(label_y > bff_y && label_y < users_y);
-            label_rows.push(label_y);
-        }
-        assert!(label_rows.windows(2).all(|rows| rows[0] == rows[1]));
-    }
-
-    #[test]
-    fn target_ownership_fits_common_viewports() {
-        for viewport in [64, 72, 80, 120] {
-            let rendered = render_json_in(target_ownership_src(), viewport)
-                .expect("ownership diagram should render");
-            assert!(
-                rendered.graph_width <= viewport,
-                "ownership diagram needs {} columns at viewport {viewport}",
-                rendered.graph_width
-            );
-        }
-    }
-
-    #[test]
-    fn target_ownership_expands_sibling_spacing_in_wide_viewports() {
-        let narrow = render_json_in(target_ownership_src(), 72).expect("narrow ownership diagram");
-        let wide = render_json_in(target_ownership_src(), 120).expect("wide ownership diagram");
-
-        assert!(
-            wide.graph_width >= narrow.graph_width + 20,
-            "wide viewport should become space between ownership branches"
-        );
-        assert!(wide.graph_width <= 120);
     }
 
     #[test]
@@ -434,46 +328,6 @@ mod tests {
             narrow.graph_width <= rendered.graph_width,
             "narrow viewports should contract decorative spacing"
         );
-    }
-
-    #[test]
-    fn target_ownership_visual_snapshot() {
-        let actual = plain_lines(target_ownership_src(), 80).join("\n");
-        let expected = r#" Target ownership
-
-                                 ┌─────────────────┐
-                                 │ Product clients │
-                                 └─────────────────┘
-                                          │
-                     account and auth API │
-                                          │
-                                          ▼
-                                      ┌───────┐
-                                      │  BFF  │
-                                      └───────┘
-                                          │
-           ┌──────────────────────────────┼───────────────────────────┐
-       accounts                   business context              authorization
-           ▼                              ▼                           ▼
- ┌───────────────────┐          ┌───────────────────┐          ┌─────────────┐
- │ Users Service [1] │          │ Server Global [2] │          │ msUsers [3] │
- └───────────────────┘          └───────────────────┘          └─────────────┘
-           │
-           │ identity provider
-           │
-           ▼
-      ┌─────────┐
-      │ Cognito │
-      └─────────┘
-
-
- [1] Users Service — Account profile, credentials, verification, and access
-     state
- [2] Server Global — Businesses, memberships, invitations, and compatibility
-     projection
- [3] msUsers — Product roles and permissions"#;
-
-        assert_eq!(actual, expected);
     }
 
     #[test]

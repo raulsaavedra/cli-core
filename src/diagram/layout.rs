@@ -1,10 +1,10 @@
 //! Top-down layout as space negotiation.
 //!
 //! Every visual element — box, edge run, label, arrowhead — is allocated cells
-//! it owns before anything is painted. Ranks become bands of rows; between
-//! consecutive bands sits a routing channel whose height is derived from the
-//! lanes and labels that must pass through it. Edges attach to per-edge ports.
-//! Long edges travel through invisible waypoints in intermediate ranks.
+//! it owns before anything is painted. Ranks become node bands. Each channel
+//! between adjacent ranks gives every semantic edge a connector row between
+//! its source and target trunks. Edges that skip ranks travel through margin
+//! gutters, and independent routes that must cross receive an overpass glyph.
 //!
 //! The output is a [`Scene`]: a fully determined set of paint operations.
 //! Paint cannot fail; everything that can go wrong goes wrong here, loudly.
@@ -27,10 +27,10 @@ const MIN_TEXT_COLS: usize = 24;
 /// diagram still read as a paragraph rather than a narrow ribbon.
 const MIN_FOOTNOTE_WIDTH: usize = 56;
 const MARGIN_Y: usize = 0;
-/// An edge spanning at least this many ranks routes down a margin corridor
-/// instead of through the interior, so it can't bisect the dense middle.
-/// Shorter spans still interpolate through the interior (which reads fine).
-const LONG_SPAN: usize = 4;
+/// An edge that skips an authored rank routes around the rank block. Passing
+/// through that block would visually imply an interaction the graph does not
+/// declare.
+const LONG_SPAN: usize = 2;
 /// Columns reserved per corridor lane in a gutter (1 line + 1 gap).
 const CORRIDOR_W: usize = 2;
 
@@ -62,6 +62,10 @@ pub enum Op {
         style: Style,
     },
     Arrow {
+        x: usize,
+        y: usize,
+    },
+    Crossover {
         x: usize,
         y: usize,
     },
@@ -107,7 +111,7 @@ enum Cell {
 }
 
 /// One endpoint of a channel segment.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum End {
     Node(usize),
     Way(usize),
@@ -128,14 +132,18 @@ struct Seg {
     tx: usize, // target port x (absolute)
     label: Option<String>,
     kind: EdgeKind,
-    /// Lane index in the channel, None for straight unlabeled segments.
+    source_bundle: Option<BundleKey>,
+    target_bundle: Option<BundleKey>,
+    /// Every semantic edge receives its own connector lane. Shared source and
+    /// target trunks are represented independently by the bundle memberships.
     lane: Option<usize>,
 }
 
 impl Seg {
-    fn is_straight(&self) -> bool {
-        self.sx == self.tx && self.label.is_none()
+    fn is_vertical(&self) -> bool {
+        self.sx == self.tx
     }
+
     fn dashed(&self) -> bool {
         matches!(self.kind, EdgeKind::Async | EdgeKind::Event)
     }
@@ -145,6 +153,12 @@ impl Seg {
             _ => Style::EdgeLine,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BundleKey {
+    Source { end: End, kind: EdgeKind },
+    Target { end: End, kind: EdgeKind },
 }
 
 struct NodeGeom {
@@ -160,12 +174,8 @@ struct NodeGeom {
 enum LabelPlace {
     /// Embedded in the horizontal run on the line row.
     Embedded { x: usize },
-    /// On a dedicated row above the line row.
+    /// On a dedicated row directly above this edge's connector.
     Row { x: usize },
-    /// Centered on the source branch immediately above a fan-in bus.
-    SourceBranch { x: usize },
-    /// Centered on the target branch immediately below a fan-out bus.
-    TargetBranch { x: usize },
 }
 
 /// A long edge routed down a margin gutter rather than the interior.
@@ -277,7 +287,8 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
             g.w = g.w.max(2 * need + 3);
         }
     }
-    let (node_envelopes, way_envelopes) = branch_label_envelopes(model, &chains, &geoms);
+    let node_envelopes: Vec<usize> = geoms.iter().map(|geom| geom.w).collect();
+    let way_envelopes = vec![1usize; way_rank.len()];
 
     // -- space negotiation -----------------------------------------------------
     // Place items, route channels, and fit labels. When a label has nowhere to
@@ -321,7 +332,6 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
         channels,
         lane_heights,
         label_places,
-        target_label_bands,
         corridor_bands,
     } = match placed {
         Some(p) => p,
@@ -342,10 +352,9 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
         if r < n_channels {
             channel_y.push(y);
             let lanes_h: usize = lane_heights[r].iter().sum();
-            let target_label_rows = usize::from(target_label_bands[r]);
-            // Source stub, routing lanes, optional fan-out label band, then the
+            // Source stub, one connector region per semantic edge, then the
             // arrow row immediately above the target rank.
-            let h = (1 + lanes_h + target_label_rows + 1).max(2);
+            let h = (1 + lanes_h + 1).max(2);
             channel_h.push(h);
             y += h;
         }
@@ -420,8 +429,9 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
     for (cidx, segs) in channels.iter().enumerate() {
         let top = channel_y[cidx];
         let arrow_row = top + channel_h[cidx] - 1;
-        let target_label_row = target_label_bands[cidx].then_some(arrow_row - 1);
         let mut emitted_arrows: HashSet<usize> = HashSet::new();
+        let mut arrow_ops: Vec<Op> = Vec::new();
+        let mut label_ops: Vec<Op> = Vec::new();
         // Precompute line rows per lane.
         let mut lane_line_row: Vec<usize> = Vec::new();
         let mut row = top + 1; // row `top` is the stub row
@@ -445,72 +455,39 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
 
             match seg.lane {
                 None => {
-                    // Straight unlabeled: one column, top..v_end.
-                    for yy in top..=v_end {
-                        cells.push((seg.sx, yy, N | S));
-                    }
+                    unreachable!("every channel segment receives a connector lane");
                 }
                 Some(lane) => {
                     let line = lane_line_row[lane];
                     if seg.sx == seg.tx {
-                        // Labeled straight: still one column.
+                        // A vertical connector still has a distinct lane where
+                        // its source and target bundle sections meet.
                         for yy in top..=v_end {
-                            if label_places[cidx].get(&si).is_some_and(|place| {
-                                (matches!(place, LabelPlace::SourceBranch { .. })
-                                    && yy == lane_line_row[lane] - 1)
-                                    || (matches!(place, LabelPlace::TargetBranch { .. })
-                                        && Some(yy) == target_label_row)
-                            }) {
-                                continue;
-                            }
                             cells.push((seg.sx, yy, N | S));
                         }
                     } else {
                         for yy in top..line {
-                            if matches!(
-                                label_places[cidx].get(&si),
-                                Some(LabelPlace::SourceBranch { .. })
-                            ) && yy == line - 1
-                            {
-                                continue;
-                            }
                             cells.push((seg.sx, yy, N | S));
                         }
                         let (lo, hi) = (seg.sx.min(seg.tx), seg.sx.max(seg.tx));
                         let going_right = seg.tx > seg.sx;
                         cells.push((seg.sx, line, N | if going_right { E } else { W }));
-                        // A bundled lane can carry several branch labels. Every
-                        // segment skips every embedded label on the shared bus,
-                        // so later strokes cannot paint through earlier text.
-                        let skips: Vec<(usize, usize)> = segs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, other)| other.lane == Some(lane))
-                            .filter_map(|(other_index, other)| {
-                                let LabelPlace::Embedded { x } =
-                                    label_places[cidx].get(&other_index)?
-                                else {
-                                    return None;
-                                };
-                                let len = other.label.as_ref()?.chars().count();
-                                Some((*x, *x + len))
-                            })
-                            .collect();
+                        let skip = label_places[cidx].get(&si).and_then(|place| {
+                            let LabelPlace::Embedded { x } = place else {
+                                return None;
+                            };
+                            Some((*x, *x + seg.label.as_ref()?.chars().count()))
+                        });
                         for x in (lo + 1)..hi {
-                            if skips.iter().any(|&(start, end)| x >= start && x < end) {
-                                continue;
+                            if let Some((start, end)) = skip {
+                                if x >= start && x < end {
+                                    continue;
+                                }
                             }
                             cells.push((x, line, E | W));
                         }
                         cells.push((seg.tx, line, S | if going_right { W } else { E }));
                         for yy in (line + 1)..=v_end {
-                            if matches!(
-                                label_places[cidx].get(&si),
-                                Some(LabelPlace::TargetBranch { .. })
-                            ) && Some(yy) == target_label_row
-                            {
-                                continue;
-                            }
                             cells.push((seg.tx, yy, N | S));
                         }
                     }
@@ -524,7 +501,7 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
             });
 
             if !target_is_way && emitted_arrows.insert(seg.tx) {
-                ops.push(Op::Arrow {
+                arrow_ops.push(Op::Arrow {
                     x: seg.tx,
                     y: arrow_row,
                 });
@@ -535,13 +512,8 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
                 let (x, y) = match label_places[cidx][&si] {
                     LabelPlace::Embedded { x } => (x, lane_line_row[lane]),
                     LabelPlace::Row { x } => (x, lane_line_row[lane] - 1),
-                    LabelPlace::SourceBranch { x } => (x, lane_line_row[lane] - 1),
-                    LabelPlace::TargetBranch { x } => (
-                        x,
-                        target_label_row.expect("target branch label has a channel band"),
-                    ),
                 };
-                ops.push(Op::Text {
+                label_ops.push(Op::Text {
                     x,
                     y,
                     text: label.clone(),
@@ -549,6 +521,12 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
                 });
             }
         }
+
+        for (x, y) in connector_crossovers(segs, &lane_line_row) {
+            ops.push(Op::Crossover { x, y });
+        }
+        ops.extend(arrow_ops);
+        ops.extend(label_ops);
     }
 
     // The graph's natural width is settled here, before footnotes. Footnotes
@@ -705,9 +683,6 @@ struct Placement {
     /// lane_heights[channel][lane] = 1, or 2 when the lane carries a label row.
     lane_heights: Vec<Vec<usize>>,
     label_places: Vec<HashMap<usize, LabelPlace>>,
-    /// A row below the routing lanes where fan-out labels sit on their target
-    /// branches. The row is shared by every fan-out bundle in the channel.
-    target_label_bands: Vec<bool>,
     /// Rank-band pass-throughs for corridor (long, margin-routed) edges:
     /// (rank, x, edge kind). Drawn by the emit stage, which knows the y rows.
     corridor_bands: Vec<(usize, usize, EdgeKind)>,
@@ -717,56 +692,6 @@ struct LayoutEnvelope<'a> {
     nodes: &'a [usize],
     ways: &'a [usize],
     viewport: usize,
-}
-
-fn branch_label_envelopes(
-    model: &Model,
-    chains: &[Chain],
-    geoms: &[NodeGeom],
-) -> (Vec<usize>, Vec<usize>) {
-    let mut node_widths: Vec<usize> = geoms.iter().map(|geom| geom.w).collect();
-    let way_count = chains
-        .iter()
-        .flat_map(|chain| chain.ends.iter())
-        .filter_map(|end| match end {
-            End::Way(way) => Some(*way + 1),
-            End::Node(_) => None,
-        })
-        .max()
-        .unwrap_or(0);
-    let mut way_widths = vec![1usize; way_count];
-
-    for chain in chains {
-        let edge = &model.edges[chain.edge];
-        let Some(label) = &edge.label else { continue };
-        let from = chain.ends[0];
-        let to = chain.ends[1];
-        let source_bundle = chains
-            .iter()
-            .filter(|other| other.ends[0] == from && model.edges[other.edge].kind == edge.kind)
-            .count()
-            > 1;
-        let target_bundle = chains
-            .iter()
-            .filter(|other| other.ends[1] == to && model.edges[other.edge].kind == edge.kind)
-            .count()
-            > 1;
-        let anchor = if source_bundle {
-            Some(to)
-        } else if target_bundle {
-            Some(from)
-        } else {
-            None
-        };
-        let Some(anchor) = anchor else { continue };
-        let required = label.chars().count() + 2;
-        match anchor {
-            End::Node(node) => node_widths[node] = node_widths[node].max(required),
-            End::Way(way) => way_widths[way] = way_widths[way].max(required),
-        }
-    }
-
-    (node_widths, way_widths)
 }
 
 fn place_and_route(
@@ -905,9 +830,9 @@ fn place_and_route(
     );
 
     // -- corridor routing for long edges --------------------------------------
-    // Assign each corridor to the gutter nearest its endpoints, shift the
-    // centered node block past the left gutter, and pin every corridor
-    // waypoint to a fixed column so the edge drops as one clean vertical.
+    // A bypass leaves on the source's outer side before descending. Moving
+    // toward the destination immediately would cut through the source rank's
+    // ordinary fan-in and fan-out routes.
     let block_w = canvas_w;
     let block_center = MARGIN_X + block_w / 2;
     let mid_of = |c: &Corridor, geoms: &[NodeGeom]| -> usize {
@@ -918,7 +843,9 @@ fn place_and_route(
     let mut left: Vec<usize> = Vec::new();
     let mut right: Vec<usize> = Vec::new();
     for i in sided {
-        if mid_of(&corridors[i], geoms) <= block_center {
+        let source = center(corridors[i].s, geoms);
+        let target = center(corridors[i].t, geoms);
+        if target > source || (target == source && source <= block_center) {
             left.push(i);
         } else {
             right.push(i);
@@ -1007,6 +934,8 @@ fn place_and_route(
                 tx: 0,
                 label: if pos == 0 { e.label.clone() } else { None },
                 kind: e.kind,
+                source_bundle: None,
+                target_bundle: None,
                 lane: None,
             });
         }
@@ -1022,13 +951,13 @@ fn place_and_route(
     for segs in &mut channels {
         assign_ports(segs, geoms, &way_x, end_center);
         nudge_conflicts(segs, geoms, &model.nodes, &way_x)?;
-        assign_lanes(segs, model)?;
+        assign_bundles(segs);
+        assign_lanes(segs);
     }
 
     // -- labels + channel heights --------------------------------------------------
     let mut lane_heights: Vec<Vec<usize>> = Vec::new();
     let mut label_places: Vec<HashMap<usize, LabelPlace>> = Vec::new();
-    let mut target_label_bands: Vec<bool> = Vec::new();
     for segs in &channels {
         let lane_count = segs
             .iter()
@@ -1038,89 +967,32 @@ fn place_and_route(
             .unwrap_or(0);
         let mut heights = vec![1usize; lane_count];
         let mut places: HashMap<usize, LabelPlace> = HashMap::new();
-        let mut embedded_text: Vec<HashSet<usize>> = vec![HashSet::new(); lane_count];
-        let mut row_text: Vec<HashSet<usize>> = vec![HashSet::new(); lane_count];
-        let mut source_branch_text: Vec<HashSet<usize>> = vec![HashSet::new(); lane_count];
-        let mut target_branch_text: HashSet<usize> = HashSet::new();
-        let mut has_target_label_band = false;
         for (si, seg) in segs.iter().enumerate() {
             let Some(label) = &seg.label else { continue };
             let lane = seg.lane.expect("labeled segment always has a lane");
             let len = label.chars().count();
             let lo = seg.sx.min(seg.tx);
             let hi = seg.sx.max(seg.tx);
-            let source_bundle = segs
-                .iter()
-                .filter(|other| other.from == seg.from && other.kind == seg.kind)
-                .count()
-                > 1;
-            let target_bundle = segs
-                .iter()
-                .filter(|other| other.to == seg.to && other.kind == seg.kind)
-                .count()
-                > 1;
 
-            if source_bundle {
-                let x = centered_label_x(seg.tx, len, canvas_w, &target_branch_text).ok_or_else(
-                    || DiagramError::Routing(format!("no room for fan-out branch label `{label}`")),
-                )?;
-                target_branch_text.extend(x.saturating_sub(1)..=x + len);
-                has_target_label_band = true;
-                places.insert(si, LabelPlace::TargetBranch { x });
-                continue;
-            }
-
-            if target_bundle {
-                let x = centered_label_x(seg.sx, len, canvas_w, &source_branch_text[lane])
-                    .ok_or_else(|| {
-                        DiagramError::Routing(format!("no room for fan-in branch label `{label}`"))
-                    })?;
-                source_branch_text[lane].extend(x.saturating_sub(1)..=x + len);
-                heights[lane] = 2;
-                places.insert(si, LabelPlace::SourceBranch { x });
-                continue;
-            }
-
-            // Try embedding in the horizontal run first.
-            let mut line_avoid = avoid_columns(segs, lane, false);
-            line_avoid.extend(embedded_text[lane].iter().copied());
+            // The connector is the one section owned only by this semantic
+            // edge, so its label stays attached even when both endpoints are
+            // bundled.
+            let line_avoid = avoid_columns(segs, lane, false);
             let run_inner = (lo + 1, hi.saturating_sub(len + 1).max(lo + 1));
             let embedded = (hi > lo + len + 3)
                 .then(|| {
-                    let preferred = if source_bundle {
-                        if seg.tx < seg.sx {
-                            seg.tx + 2
-                        } else {
-                            seg.tx.saturating_sub(len + 2)
-                        }
-                    } else if target_bundle {
-                        if seg.sx < seg.tx {
-                            seg.sx + 2
-                        } else {
-                            seg.sx.saturating_sub(len + 2)
-                        }
-                    } else {
-                        ((lo + hi) / 2).saturating_sub(len / 2)
-                    };
+                    let preferred = ((lo + hi) / 2).saturating_sub(len / 2);
                     pick_label_x(preferred, run_inner.0, run_inner.1, len, &line_avoid)
                 })
                 .flatten();
             if let Some(x) = embedded {
                 places.insert(si, LabelPlace::Embedded { x });
-                embedded_text[lane].extend(x..x + len);
                 continue;
             }
 
             // Dedicated label row above the line row.
-            let mut row_avoid = avoid_columns(segs, lane, true);
-            row_avoid.extend(row_text[lane].iter().copied());
-            let anchor = if source_bundle {
-                seg.tx
-            } else if target_bundle {
-                seg.sx
-            } else {
-                (seg.sx + seg.tx) / 2
-            };
+            let row_avoid = avoid_columns(segs, lane, true);
+            let anchor = (seg.sx + seg.tx) / 2;
             let x = pick_label_x(
                 anchor.saturating_sub(len / 2),
                 MARGIN_X,
@@ -1131,11 +1003,9 @@ fn place_and_route(
             .ok_or_else(|| DiagramError::Routing(format!("no room for edge label `{label}`")))?;
             heights[lane] = 2;
             places.insert(si, LabelPlace::Row { x });
-            row_text[lane].extend(x..x + len);
         }
         lane_heights.push(heights);
         label_places.push(places);
-        target_label_bands.push(has_target_label_band);
     }
 
     Ok(Placement {
@@ -1144,7 +1014,6 @@ fn place_and_route(
         channels,
         lane_heights,
         label_places,
-        target_label_bands,
         corridor_bands,
     })
 }
@@ -1180,24 +1049,6 @@ fn responsive_gap(
     fitting_gap
         .map(|gap| gap.min(MAX_RESPONSIVE_GAP_X).max(minimum))
         .unwrap_or(minimum)
-}
-
-/// Center a branch label on its port. Bundled labels keep this exact attachment;
-/// a collision requests a wider placement attempt instead of drifting the text
-/// away from the branch it describes.
-fn centered_label_x(
-    port: usize,
-    len: usize,
-    canvas_w: usize,
-    occupied: &HashSet<usize>,
-) -> Option<usize> {
-    let x = port.checked_sub(len / 2)?;
-    let lo = x.saturating_sub(1);
-    let hi = x + len;
-    (x >= MARGIN_X
-        && x + len <= MARGIN_X + canvas_w
-        && !(lo..=hi).any(|column| occupied.contains(&column)))
-    .then_some(x)
 }
 
 /// Assign x to every node and interior waypoint for the given cell ordering.
@@ -1508,14 +1359,14 @@ fn nudge_conflicts(
         let straight: Vec<(usize, usize)> = segs
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_straight())
+            .filter(|(_, s)| s.is_vertical())
             .map(|(index, s)| (index, s.sx))
             .collect();
         let straight_cols: HashSet<usize> = straight.iter().map(|(_, column)| *column).collect();
 
         let mut conflict: Option<(usize, bool)> = None; // (seg idx, fix_source)
         for (i, seg) in segs.iter().enumerate() {
-            if seg.is_straight() {
+            if seg.is_vertical() {
                 continue;
             }
             let shared_source = straight.iter().any(|&(straight_index, column)| {
@@ -1587,148 +1438,143 @@ fn nudge_conflicts(
     ))
 }
 
-/// Assign compact routing lanes. Segments with a shared source or target port
-/// become one routing unit, giving fan-out and fan-in a common bus. Independent
-/// units reuse a lane when their horizontal intervals do not overlap.
-fn assign_lanes(segs: &mut [Seg], model: &Model) -> Result<(), DiagramError> {
-    let laned: Vec<usize> = segs
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| !s.is_straight())
-        .map(|(i, _)| i)
-        .collect();
-    let n = laned.len();
-    if n == 0 {
-        return Ok(());
+/// Record shared source and target trunks independently. A semantic edge can
+/// participate in both bundles while retaining its own connector between them.
+fn assign_bundles(segs: &mut [Seg]) {
+    let mut source_counts: HashMap<(End, EdgeKind), usize> = HashMap::new();
+    let mut target_counts: HashMap<(End, EdgeKind), usize> = HashMap::new();
+    for seg in segs.iter() {
+        *source_counts.entry((seg.from, seg.kind)).or_default() += 1;
+        *target_counts.entry((seg.to, seg.kind)).or_default() += 1;
     }
 
-    struct RouteUnit {
-        segments: Vec<usize>,
-        lo: usize,
-        hi: usize,
-    }
-
-    let mut remaining: HashSet<usize> = laned.iter().copied().collect();
-    let mut units: Vec<RouteUnit> = Vec::new();
-    while let Some(&seed) = remaining.iter().min() {
-        let source_group: Vec<usize> = remaining
-            .iter()
-            .copied()
-            .filter(|&i| segs[i].from == segs[seed].from && segs[i].kind == segs[seed].kind)
-            .collect();
-        let target_group: Vec<usize> = remaining
-            .iter()
-            .copied()
-            .filter(|&i| segs[i].to == segs[seed].to && segs[i].kind == segs[seed].kind)
-            .collect();
-        let members = if source_group.len() > 1 {
-            source_group
-        } else if target_group.len() > 1 {
-            target_group
-        } else {
-            vec![seed]
-        };
-        for member in &members {
-            remaining.remove(member);
+    for seg in segs {
+        if source_counts[&(seg.from, seg.kind)] > 1 {
+            seg.source_bundle = Some(BundleKey::Source {
+                end: seg.from,
+                kind: seg.kind,
+            });
         }
-        let lo = members
-            .iter()
-            .map(|&i| segs[i].sx.min(segs[i].tx))
-            .min()
-            .unwrap();
-        let hi = members
-            .iter()
-            .map(|&i| segs[i].sx.max(segs[i].tx))
-            .max()
-            .unwrap();
-        units.push(RouteUnit {
-            segments: members,
-            lo,
-            hi,
-        });
+        if target_counts[&(seg.to, seg.kind)] > 1 {
+            seg.target_bundle = Some(BundleKey::Target {
+                end: seg.to,
+                kind: seg.kind,
+            });
+        }
+    }
+}
+
+fn shares_attachment(a: &Seg, b: &Seg, column: usize) -> bool {
+    (column == a.sx && a.source_bundle.is_some() && a.source_bundle == b.source_bundle)
+        || (column == a.tx && a.target_bundle.is_some() && a.target_bundle == b.target_bundle)
+}
+
+/// Assign one connector lane to every semantic edge. The precedence graph
+/// avoids crossings whenever the endpoint order permits it. A cycle means the
+/// fixed rank order is non-planar; the remaining edges are ordered
+/// deterministically and their intersections render as explicit crossovers.
+fn assign_lanes(segs: &mut [Seg]) {
+    let n = segs.len();
+    if n == 0 {
+        return;
     }
 
-    // precedence[a] contains b => unit a must route above unit b because one
-    // unit descends at the column where the other rises.
-    let unit_count = units.len();
-    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); unit_count];
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); unit_count];
-    let mut indeg = vec![0usize; unit_count];
-    for a in 0..unit_count {
-        for b in 0..unit_count {
+    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg = vec![0usize; n];
+    let mut add_precedence = |before: usize, after: usize| {
+        if before != after && !succs[before].contains(&after) {
+            succs[before].push(after);
+            indeg[after] += 1;
+        }
+    };
+
+    for a in 0..n {
+        let lo = segs[a].sx.min(segs[a].tx);
+        let hi = segs[a].sx.max(segs[a].tx);
+        for b in 0..n {
             if a == b {
                 continue;
             }
-            let precedes = units[a].segments.iter().any(|&ai| {
-                units[b]
-                    .segments
-                    .iter()
-                    .any(|&bi| segs[ai].sx == segs[bi].tx)
-            });
-            if precedes && !succs[a].contains(&b) {
-                succs[a].push(b);
-                preds[b].push(a);
-                indeg[b] += 1;
+
+            if segs[b].sx >= lo
+                && segs[b].sx <= hi
+                && !shares_attachment(&segs[a], &segs[b], segs[b].sx)
+            {
+                // B's source vertical must turn before A crosses its column.
+                add_precedence(b, a);
+            }
+            if segs[b].tx >= lo
+                && segs[b].tx <= hi
+                && !shares_attachment(&segs[a], &segs[b], segs[b].tx)
+            {
+                // A must cross before B's target vertical begins.
+                add_precedence(a, b);
             }
         }
     }
 
-    let mut ready: Vec<usize> = (0..unit_count).filter(|&i| indeg[i] == 0).collect();
-    let mut order: Vec<usize> = Vec::with_capacity(unit_count);
-    while !ready.is_empty() {
-        ready.sort_by_key(|&i| (units[i].lo, units[i].hi, units[i].segments[0]));
-        let i = ready.remove(0);
+    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    while order.len() < n {
+        let key = |i: usize| {
+            (
+                indeg[i],
+                segs[i].sx.min(segs[i].tx),
+                segs[i].sx.max(segs[i].tx),
+                segs[i].chain,
+            )
+        };
+        let i = (0..n)
+            .filter(|&candidate| !placed[candidate] && indeg[candidate] == 0)
+            .min_by_key(|&candidate| key(candidate))
+            .or_else(|| {
+                (0..n)
+                    .filter(|&candidate| !placed[candidate])
+                    .min_by_key(|&candidate| key(candidate))
+            })
+            .expect("an unplaced connector remains");
+        placed[i] = true;
         order.push(i);
         for &j in &succs[i] {
-            indeg[j] -= 1;
-            if indeg[j] == 0 {
-                ready.push(j);
+            if !placed[j] {
+                indeg[j] = indeg[j].saturating_sub(1);
             }
         }
     }
-    if order.len() != unit_count {
-        let ids: Vec<String> = laned
-            .iter()
-            .map(|&i| {
-                let e = &model.edges[segs[i].chain];
-                let _ = e;
-                format!("segment {}", i)
-            })
-            .collect();
-        return Err(DiagramError::Routing(format!(
-            "channel routing cycle between {}",
-            ids.join(", ")
-        )));
+
+    for (lane, segment) in order.into_iter().enumerate() {
+        segs[segment].lane = Some(lane);
+    }
+}
+
+/// Find intersections between independent connectors. Shared endpoint trunks
+/// remain junctions; every other intersection is painted as an overpass.
+fn connector_crossovers(segs: &[Seg], line_rows: &[usize]) -> Vec<(usize, usize)> {
+    let mut crossings: HashSet<(usize, usize)> = HashSet::new();
+    for (a_index, a) in segs.iter().enumerate() {
+        if a.sx == a.tx {
+            continue;
+        }
+        let a_lane = a.lane.expect("connector lane assigned");
+        let y = line_rows[a_lane];
+        let lo = a.sx.min(a.tx);
+        let hi = a.sx.max(a.tx);
+
+        for (b_index, b) in segs.iter().enumerate() {
+            if a_index == b_index {
+                continue;
+            }
+            let b_lane = b.lane.expect("connector lane assigned");
+            let column = if a_lane < b_lane { b.sx } else { b.tx };
+            if column >= lo && column <= hi && !shares_attachment(a, b, column) {
+                crossings.insert((column, y));
+            }
+        }
     }
 
-    let mut lanes: Vec<Vec<usize>> = Vec::new();
-    let mut unit_lane: Vec<Option<usize>> = vec![None; unit_count];
-    for unit in order {
-        let min_lane = preds[unit]
-            .iter()
-            .filter_map(|&pred| unit_lane[pred])
-            .map(|lane| lane + 1)
-            .max()
-            .unwrap_or(0);
-        let lane = (min_lane..)
-            .find(|&candidate| {
-                lanes.get(candidate).is_none_or(|occupants| {
-                    occupants.iter().all(|&other| {
-                        units[unit].hi + 1 < units[other].lo || units[other].hi + 1 < units[unit].lo
-                    })
-                })
-            })
-            .unwrap();
-        if lane == lanes.len() {
-            lanes.push(Vec::new());
-        }
-        lanes[lane].push(unit);
-        unit_lane[unit] = Some(lane);
-        for &segment in &units[unit].segments {
-            segs[segment].lane = Some(lane);
-        }
-    }
-    Ok(())
+    let mut crossings: Vec<(usize, usize)> = crossings.into_iter().collect();
+    crossings.sort_unstable_by_key(|&(x, y)| (y, x));
+    crossings
 }
 
 /// Columns a label on lane `lane` must not cover.
@@ -1736,7 +1582,7 @@ fn assign_lanes(segs: &mut [Seg], model: &Model) -> Result<(), DiagramError> {
 fn avoid_columns(segs: &[Seg], lane: usize, label_row: bool) -> HashSet<usize> {
     let mut cols = HashSet::new();
     for s in segs {
-        if s.is_straight() {
+        if s.is_vertical() {
             cols.insert(s.sx);
             continue;
         }
