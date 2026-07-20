@@ -67,7 +67,10 @@ impl Grid {
     }
 
     fn idx(&self, x: usize, y: usize) -> usize {
-        debug_assert!(x < self.width && y < self.height, "cell ({x},{y}) out of bounds");
+        debug_assert!(
+            x < self.width && y < self.height,
+            "cell ({x},{y}) out of bounds"
+        );
         y * self.width + x
     }
 
@@ -77,16 +80,16 @@ impl Grid {
         let cell = &mut self.cells[i];
         if cell.mask == 0 && cell.ch != ' ' {
             // Stroke meeting text/border: layout must prevent this.
-            debug_assert!(
-                false,
-                "stroke ({x},{y}) collides with text {:?}",
-                cell.ch
-            );
+            debug_assert!(false, "stroke ({x},{y}) collides with text {:?}", cell.ch);
             return;
         }
         cell.mask |= mask;
         // Solid wins over dashed at junctions; a pure dashed line stays dashed.
-        cell.dashed = if cell.mask == mask { dashed } else { cell.dashed && dashed };
+        cell.dashed = if cell.mask == mask {
+            dashed
+        } else {
+            cell.dashed && dashed
+        };
         cell.ch = mask_to_char(cell.mask, cell.dashed);
         // Event styling wins so event edges stay visible through junctions.
         if cell.style == Style::Empty || style == Style::EdgeLineEvent {

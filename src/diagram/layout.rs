@@ -15,6 +15,9 @@ use super::doc::{DiagramError, EdgeKind, Model, NodeKind, NoteMark};
 use super::grid::{Style, E, N, S, W};
 
 const GAP_X: usize = 4;
+/// Sibling branches stop spreading once the diagram has enough whitespace to
+/// distinguish their paths without turning one relationship into a wide scan.
+const MAX_RESPONSIVE_GAP_X: usize = 20;
 const RANK_H: usize = 3;
 const MARGIN_X: usize = 1;
 /// Minimum text columns a footnote keeps even under a deep indent, so a long
@@ -159,6 +162,10 @@ enum LabelPlace {
     Embedded { x: usize },
     /// On a dedicated row above the line row.
     Row { x: usize },
+    /// Centered on the source branch immediately above a fan-in bus.
+    SourceBranch { x: usize },
+    /// Centered on the target branch immediately below a fan-out bus.
+    TargetBranch { x: usize },
 }
 
 /// A long edge routed down a margin gutter rather than the interior.
@@ -220,7 +227,11 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
                 ),
             };
             if let Some(nums) = markers_of.get(&idx) {
-                let list = nums.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
+                let list = nums
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 content.push_str(&format!(" [{list}]"));
             }
             NodeGeom {
@@ -266,18 +277,36 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
             g.w = g.w.max(2 * need + 3);
         }
     }
+    let (node_envelopes, way_envelopes) = branch_label_envelopes(model, &chains, &geoms);
 
     // -- space negotiation -----------------------------------------------------
     // Place items, route channels, and fit labels. When a label has nowhere to
     // go, the answer is more horizontal room: widen the gaps and re-place.
     // Truncation is never the answer.
     const MAX_ATTEMPTS: usize = 8;
+    let base_gap = match viewport {
+        0..=48 => 1,
+        49..=72 => 2,
+        _ => GAP_X,
+    };
     let mut placed: Option<Placement> = None;
     let mut last_err: Option<DiagramError> = None;
     for attempt in 0..MAX_ATTEMPTS {
-        let gap = GAP_X + attempt * 4;
+        let gap = base_gap + attempt * 4;
         let extra_canvas = attempt * 8;
-        match place_and_route(model, &mut geoms, &chains, &ways_in_rank, gap, extra_canvas) {
+        match place_and_route(
+            model,
+            &mut geoms,
+            &chains,
+            &ways_in_rank,
+            LayoutEnvelope {
+                nodes: &node_envelopes,
+                ways: &way_envelopes,
+                viewport,
+            },
+            gap,
+            extra_canvas,
+        ) {
             Ok(p) => {
                 placed = Some(p);
                 break;
@@ -292,6 +321,7 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
         channels,
         lane_heights,
         label_places,
+        target_label_bands,
         corridor_bands,
     } = match placed {
         Some(p) => p,
@@ -312,8 +342,10 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
         if r < n_channels {
             channel_y.push(y);
             let lanes_h: usize = lane_heights[r].iter().sum();
-            // stub row + lanes + arrow row; min 2 keeps a visible gap.
-            let h = (1 + lanes_h + 1).max(2);
+            let target_label_rows = usize::from(target_label_bands[r]);
+            // Source stub, routing lanes, optional fan-out label band, then the
+            // arrow row immediately above the target rank.
+            let h = (1 + lanes_h + target_label_rows + 1).max(2);
             channel_h.push(h);
             y += h;
         }
@@ -388,6 +420,8 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
     for (cidx, segs) in channels.iter().enumerate() {
         let top = channel_y[cidx];
         let arrow_row = top + channel_h[cidx] - 1;
+        let target_label_row = target_label_bands[cidx].then_some(arrow_row - 1);
+        let mut emitted_arrows: HashSet<usize> = HashSet::new();
         // Precompute line rows per lane.
         let mut lane_line_row: Vec<usize> = Vec::new();
         let mut row = top + 1; // row `top` is the stub row
@@ -403,7 +437,11 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
 
             // Rows the target-side vertical must reach.
             let target_is_way = matches!(seg.to, End::Way(_));
-            let v_end = if target_is_way { arrow_row } else { arrow_row - 1 };
+            let v_end = if target_is_way {
+                arrow_row
+            } else {
+                arrow_row - 1
+            };
 
             match seg.lane {
                 None => {
@@ -417,33 +455,62 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
                     if seg.sx == seg.tx {
                         // Labeled straight: still one column.
                         for yy in top..=v_end {
+                            if label_places[cidx].get(&si).is_some_and(|place| {
+                                (matches!(place, LabelPlace::SourceBranch { .. })
+                                    && yy == lane_line_row[lane] - 1)
+                                    || (matches!(place, LabelPlace::TargetBranch { .. })
+                                        && Some(yy) == target_label_row)
+                            }) {
+                                continue;
+                            }
                             cells.push((seg.sx, yy, N | S));
                         }
                     } else {
                         for yy in top..line {
+                            if matches!(
+                                label_places[cidx].get(&si),
+                                Some(LabelPlace::SourceBranch { .. })
+                            ) && yy == line - 1
+                            {
+                                continue;
+                            }
                             cells.push((seg.sx, yy, N | S));
                         }
                         let (lo, hi) = (seg.sx.min(seg.tx), seg.sx.max(seg.tx));
                         let going_right = seg.tx > seg.sx;
                         cells.push((seg.sx, line, N | if going_right { E } else { W }));
-                        // Horizontal run, skipping embedded label cells.
-                        let skip = match label_places[cidx].get(&si) {
-                            Some(LabelPlace::Embedded { x }) => {
-                                let len = seg.label.as_ref().unwrap().chars().count();
+                        // A bundled lane can carry several branch labels. Every
+                        // segment skips every embedded label on the shared bus,
+                        // so later strokes cannot paint through earlier text.
+                        let skips: Vec<(usize, usize)> = segs
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, other)| other.lane == Some(lane))
+                            .filter_map(|(other_index, other)| {
+                                let LabelPlace::Embedded { x } =
+                                    label_places[cidx].get(&other_index)?
+                                else {
+                                    return None;
+                                };
+                                let len = other.label.as_ref()?.chars().count();
                                 Some((*x, *x + len))
-                            }
-                            _ => None,
-                        };
+                            })
+                            .collect();
                         for x in (lo + 1)..hi {
-                            if let Some((sx0, sx1)) = skip {
-                                if x >= sx0 && x < sx1 {
-                                    continue;
-                                }
+                            if skips.iter().any(|&(start, end)| x >= start && x < end) {
+                                continue;
                             }
                             cells.push((x, line, E | W));
                         }
                         cells.push((seg.tx, line, S | if going_right { W } else { E }));
                         for yy in (line + 1)..=v_end {
+                            if matches!(
+                                label_places[cidx].get(&si),
+                                Some(LabelPlace::TargetBranch { .. })
+                            ) && Some(yy) == target_label_row
+                            {
+                                continue;
+                            }
                             cells.push((seg.tx, yy, N | S));
                         }
                     }
@@ -456,7 +523,7 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
                 style,
             });
 
-            if !target_is_way {
+            if !target_is_way && emitted_arrows.insert(seg.tx) {
                 ops.push(Op::Arrow {
                     x: seg.tx,
                     y: arrow_row,
@@ -468,6 +535,11 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
                 let (x, y) = match label_places[cidx][&si] {
                     LabelPlace::Embedded { x } => (x, lane_line_row[lane]),
                     LabelPlace::Row { x } => (x, lane_line_row[lane] - 1),
+                    LabelPlace::SourceBranch { x } => (x, lane_line_row[lane] - 1),
+                    LabelPlace::TargetBranch { x } => (
+                        x,
+                        target_label_row.expect("target branch label has a channel band"),
+                    ),
                 };
                 ops.push(Op::Text {
                     x,
@@ -574,7 +646,13 @@ fn wrap_hanging(text: &str, first: usize, rest: usize) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut cur_w = 0;
-    let avail = |line_idx: usize| if line_idx == 0 { first.max(1) } else { rest.max(1) };
+    let avail = |line_idx: usize| {
+        if line_idx == 0 {
+            first.max(1)
+        } else {
+            rest.max(1)
+        }
+    };
     for word in text.split_whitespace() {
         let ww = word.chars().count();
         let w = avail(lines.len());
@@ -627,9 +705,68 @@ struct Placement {
     /// lane_heights[channel][lane] = 1, or 2 when the lane carries a label row.
     lane_heights: Vec<Vec<usize>>,
     label_places: Vec<HashMap<usize, LabelPlace>>,
+    /// A row below the routing lanes where fan-out labels sit on their target
+    /// branches. The row is shared by every fan-out bundle in the channel.
+    target_label_bands: Vec<bool>,
     /// Rank-band pass-throughs for corridor (long, margin-routed) edges:
     /// (rank, x, edge kind). Drawn by the emit stage, which knows the y rows.
     corridor_bands: Vec<(usize, usize, EdgeKind)>,
+}
+
+struct LayoutEnvelope<'a> {
+    nodes: &'a [usize],
+    ways: &'a [usize],
+    viewport: usize,
+}
+
+fn branch_label_envelopes(
+    model: &Model,
+    chains: &[Chain],
+    geoms: &[NodeGeom],
+) -> (Vec<usize>, Vec<usize>) {
+    let mut node_widths: Vec<usize> = geoms.iter().map(|geom| geom.w).collect();
+    let way_count = chains
+        .iter()
+        .flat_map(|chain| chain.ends.iter())
+        .filter_map(|end| match end {
+            End::Way(way) => Some(*way + 1),
+            End::Node(_) => None,
+        })
+        .max()
+        .unwrap_or(0);
+    let mut way_widths = vec![1usize; way_count];
+
+    for chain in chains {
+        let edge = &model.edges[chain.edge];
+        let Some(label) = &edge.label else { continue };
+        let from = chain.ends[0];
+        let to = chain.ends[1];
+        let source_bundle = chains
+            .iter()
+            .filter(|other| other.ends[0] == from && model.edges[other.edge].kind == edge.kind)
+            .count()
+            > 1;
+        let target_bundle = chains
+            .iter()
+            .filter(|other| other.ends[1] == to && model.edges[other.edge].kind == edge.kind)
+            .count()
+            > 1;
+        let anchor = if source_bundle {
+            Some(to)
+        } else if target_bundle {
+            Some(from)
+        } else {
+            None
+        };
+        let Some(anchor) = anchor else { continue };
+        let required = label.chars().count() + 2;
+        match anchor {
+            End::Node(node) => node_widths[node] = node_widths[node].max(required),
+            End::Way(way) => way_widths[way] = way_widths[way].max(required),
+        }
+    }
+
+    (node_widths, way_widths)
 }
 
 fn place_and_route(
@@ -637,6 +774,7 @@ fn place_and_route(
     geoms: &mut [NodeGeom],
     chains: &[Chain],
     ways_in_rank: &[Vec<usize>],
+    envelope: LayoutEnvelope<'_>,
     gap: usize,
     extra_canvas: usize,
 ) -> Result<Placement, DiagramError> {
@@ -707,17 +845,30 @@ fn place_and_route(
         .collect();
 
     let mut way_x = vec![0usize; way_count];
-
+    let gap = responsive_gap(
+        &orders,
+        geoms,
+        envelope.nodes,
+        envelope.ways,
+        gap,
+        envelope.viewport,
+    );
     // extra_canvas grows on retry so labels in narrow diagrams get room.
-    let mut canvas_w = place_rows(&orders, geoms, &mut way_x, gap, extra_canvas);
+    let mut canvas_w = place_rows(
+        &orders,
+        geoms,
+        &mut way_x,
+        envelope.nodes,
+        envelope.ways,
+        gap,
+        extra_canvas,
+    );
 
     // Relax: slot each waypoint toward its interpolated target so a long edge
     // drops through the interior instead of detouring around the edge. Sorting
     // by node *centres* lets a waypoint claim the gap between two boxes; node
     // centres stay monotonic in author order, so only waypoints actually move.
-    let center = |node: usize, geoms: &[NodeGeom]| -> usize {
-        geoms[node].x + geoms[node].w / 2
-    };
+    let center = |node: usize, geoms: &[NodeGeom]| -> usize { geoms[node].x + geoms[node].w / 2 };
     for _ in 0..4 {
         for cells in &mut orders {
             cells.sort_by_key(|c| match *c {
@@ -728,8 +879,30 @@ fn place_and_route(
                 }
             });
         }
-        canvas_w = place_rows(&orders, geoms, &mut way_x, gap, extra_canvas);
+        canvas_w = place_rows(
+            &orders,
+            geoms,
+            &mut way_x,
+            envelope.nodes,
+            envelope.ways,
+            gap,
+            extra_canvas,
+        );
     }
+
+    // The widest rank establishes the diagram's horizontal frame. Translate
+    // every rank above and below it toward the connected rank beside it. This
+    // preserves author order and compact spacing while aligning chains such as
+    // service -> provider instead of centering each row independently.
+    canvas_w = align_rank_blocks(
+        model,
+        &orders,
+        geoms,
+        &mut way_x,
+        envelope.nodes,
+        envelope.ways,
+        canvas_w,
+    );
 
     // -- corridor routing for long edges --------------------------------------
     // Assign each corridor to the gutter nearest its endpoints, shift the
@@ -751,8 +924,16 @@ fn place_and_route(
             right.push(i);
         }
     }
-    let left_gutter_w = if left.is_empty() { 0 } else { left.len() * CORRIDOR_W + 1 };
-    let right_gutter_w = if right.is_empty() { 0 } else { right.len() * CORRIDOR_W + 1 };
+    let left_gutter_w = if left.is_empty() {
+        0
+    } else {
+        left.len() * CORRIDOR_W + 1
+    };
+    let right_gutter_w = if right.is_empty() {
+        0
+    } else {
+        right.len() * CORRIDOR_W + 1
+    };
 
     if left_gutter_w > 0 {
         for g in geoms.iter_mut() {
@@ -847,6 +1028,7 @@ fn place_and_route(
     // -- labels + channel heights --------------------------------------------------
     let mut lane_heights: Vec<Vec<usize>> = Vec::new();
     let mut label_places: Vec<HashMap<usize, LabelPlace>> = Vec::new();
+    let mut target_label_bands: Vec<bool> = Vec::new();
     for segs in &channels {
         let lane_count = segs
             .iter()
@@ -856,38 +1038,91 @@ fn place_and_route(
             .unwrap_or(0);
         let mut heights = vec![1usize; lane_count];
         let mut places: HashMap<usize, LabelPlace> = HashMap::new();
+        let mut embedded_text: Vec<HashSet<usize>> = vec![HashSet::new(); lane_count];
+        let mut row_text: Vec<HashSet<usize>> = vec![HashSet::new(); lane_count];
+        let mut source_branch_text: Vec<HashSet<usize>> = vec![HashSet::new(); lane_count];
+        let mut target_branch_text: HashSet<usize> = HashSet::new();
+        let mut has_target_label_band = false;
         for (si, seg) in segs.iter().enumerate() {
             let Some(label) = &seg.label else { continue };
             let lane = seg.lane.expect("labeled segment always has a lane");
             let len = label.chars().count();
             let lo = seg.sx.min(seg.tx);
             let hi = seg.sx.max(seg.tx);
+            let source_bundle = segs
+                .iter()
+                .filter(|other| other.from == seg.from && other.kind == seg.kind)
+                .count()
+                > 1;
+            let target_bundle = segs
+                .iter()
+                .filter(|other| other.to == seg.to && other.kind == seg.kind)
+                .count()
+                > 1;
+
+            if source_bundle {
+                let x = centered_label_x(seg.tx, len, canvas_w, &target_branch_text).ok_or_else(
+                    || DiagramError::Routing(format!("no room for fan-out branch label `{label}`")),
+                )?;
+                target_branch_text.extend(x.saturating_sub(1)..=x + len);
+                has_target_label_band = true;
+                places.insert(si, LabelPlace::TargetBranch { x });
+                continue;
+            }
+
+            if target_bundle {
+                let x = centered_label_x(seg.sx, len, canvas_w, &source_branch_text[lane])
+                    .ok_or_else(|| {
+                        DiagramError::Routing(format!("no room for fan-in branch label `{label}`"))
+                    })?;
+                source_branch_text[lane].extend(x.saturating_sub(1)..=x + len);
+                heights[lane] = 2;
+                places.insert(si, LabelPlace::SourceBranch { x });
+                continue;
+            }
 
             // Try embedding in the horizontal run first.
-            let line_avoid = avoid_columns(segs, lane, false);
+            let mut line_avoid = avoid_columns(segs, lane, false);
+            line_avoid.extend(embedded_text[lane].iter().copied());
             let run_inner = (lo + 1, hi.saturating_sub(len + 1).max(lo + 1));
             let embedded = (hi > lo + len + 3)
                 .then(|| {
-                    let mid = (lo + hi) / 2;
-                    pick_label_x(
-                        mid.saturating_sub(len / 2),
-                        run_inner.0,
-                        run_inner.1,
-                        len,
-                        &line_avoid,
-                    )
+                    let preferred = if source_bundle {
+                        if seg.tx < seg.sx {
+                            seg.tx + 2
+                        } else {
+                            seg.tx.saturating_sub(len + 2)
+                        }
+                    } else if target_bundle {
+                        if seg.sx < seg.tx {
+                            seg.sx + 2
+                        } else {
+                            seg.sx.saturating_sub(len + 2)
+                        }
+                    } else {
+                        ((lo + hi) / 2).saturating_sub(len / 2)
+                    };
+                    pick_label_x(preferred, run_inner.0, run_inner.1, len, &line_avoid)
                 })
                 .flatten();
             if let Some(x) = embedded {
                 places.insert(si, LabelPlace::Embedded { x });
+                embedded_text[lane].extend(x..x + len);
                 continue;
             }
 
             // Dedicated label row above the line row.
-            let row_avoid = avoid_columns(segs, lane, true);
-            let mid = (seg.sx + seg.tx) / 2;
+            let mut row_avoid = avoid_columns(segs, lane, true);
+            row_avoid.extend(row_text[lane].iter().copied());
+            let anchor = if source_bundle {
+                seg.tx
+            } else if target_bundle {
+                seg.sx
+            } else {
+                (seg.sx + seg.tx) / 2
+            };
             let x = pick_label_x(
-                mid.saturating_sub(len / 2),
+                anchor.saturating_sub(len / 2),
                 MARGIN_X,
                 (MARGIN_X + canvas_w).saturating_sub(len),
                 len,
@@ -896,9 +1131,11 @@ fn place_and_route(
             .ok_or_else(|| DiagramError::Routing(format!("no room for edge label `{label}`")))?;
             heights[lane] = 2;
             places.insert(si, LabelPlace::Row { x });
+            row_text[lane].extend(x..x + len);
         }
         lane_heights.push(heights);
         label_places.push(places);
+        target_label_bands.push(has_target_label_band);
     }
 
     Ok(Placement {
@@ -907,8 +1144,60 @@ fn place_and_route(
         channels,
         lane_heights,
         label_places,
+        target_label_bands,
         corridor_bands,
     })
+}
+
+/// Expand sibling gaps when the viewport has room while preserving a bounded
+/// reading width. Every rank must fit the chosen gap, so denser ranks naturally
+/// limit the expansion used by the whole graph.
+fn responsive_gap(
+    orders: &[Vec<Cell>],
+    geoms: &[NodeGeom],
+    node_envelopes: &[usize],
+    way_envelopes: &[usize],
+    minimum: usize,
+    viewport: usize,
+) -> usize {
+    if viewport == usize::MAX {
+        return minimum;
+    }
+
+    let available = viewport.saturating_sub(2 * MARGIN_X);
+    let fitting_gap = orders
+        .iter()
+        .filter(|cells| cells.len() > 1)
+        .map(|cells| {
+            let content_width: usize = cells
+                .iter()
+                .map(|cell| cell_width(cell, geoms, node_envelopes, way_envelopes))
+                .sum();
+            available.saturating_sub(content_width) / (cells.len() - 1)
+        })
+        .min();
+
+    fitting_gap
+        .map(|gap| gap.min(MAX_RESPONSIVE_GAP_X).max(minimum))
+        .unwrap_or(minimum)
+}
+
+/// Center a branch label on its port. Bundled labels keep this exact attachment;
+/// a collision requests a wider placement attempt instead of drifting the text
+/// away from the branch it describes.
+fn centered_label_x(
+    port: usize,
+    len: usize,
+    canvas_w: usize,
+    occupied: &HashSet<usize>,
+) -> Option<usize> {
+    let x = port.checked_sub(len / 2)?;
+    let lo = x.saturating_sub(1);
+    let hi = x + len;
+    (x >= MARGIN_X
+        && x + len <= MARGIN_X + canvas_w
+        && !(lo..=hi).any(|column| occupied.contains(&column)))
+    .then_some(x)
 }
 
 /// Assign x to every node and interior waypoint for the given cell ordering.
@@ -918,6 +1207,8 @@ fn place_rows(
     orders: &[Vec<Cell>],
     geoms: &mut [NodeGeom],
     way_x: &mut [usize],
+    node_envelopes: &[usize],
+    way_envelopes: &[usize],
     gap: usize,
     extra_canvas: usize,
 ) -> usize {
@@ -927,10 +1218,7 @@ fn place_rows(
             if i > 0 {
                 w += gap;
             }
-            match c {
-                Cell::Node(node) => w += geoms[*node].w,
-                Cell::Way(_) => w += 1,
-            }
+            w += cell_width(c, geoms, node_envelopes, way_envelopes);
         }
         w
     };
@@ -940,7 +1228,7 @@ fn place_rows(
         .map(|cells| row_width(cells, geoms))
         .max()
         .unwrap_or(0)
-        + extra_canvas;
+        .saturating_add(extra_canvas);
 
     for cells in orders {
         let used = row_width(cells, geoms);
@@ -949,19 +1237,175 @@ fn place_rows(
             if i > 0 {
                 x += gap;
             }
+            let width = cell_width(c, geoms, node_envelopes, way_envelopes);
             match c {
                 Cell::Node(node) => {
-                    geoms[*node].x = x;
-                    x += geoms[*node].w;
+                    geoms[*node].x = x + (width - geoms[*node].w) / 2;
                 }
                 Cell::Way(w) => {
-                    way_x[*w] = x;
-                    x += 1;
+                    way_x[*w] = x + width / 2;
                 }
             }
+            x += width;
         }
     }
     canvas_w
+}
+
+fn cell_width(
+    cell: &Cell,
+    geoms: &[NodeGeom],
+    node_envelopes: &[usize],
+    way_envelopes: &[usize],
+) -> usize {
+    match cell {
+        Cell::Node(node) => node_envelopes[*node].max(geoms[*node].w),
+        Cell::Way(way) => way_envelopes[*way].max(1),
+    }
+}
+
+/// Align whole rank blocks from graph relationships while preserving the
+/// compact ordering established by [`place_rows`]. The widest rank is stable;
+/// ranks above follow their children and ranks below follow their parents.
+fn align_rank_blocks(
+    model: &Model,
+    orders: &[Vec<Cell>],
+    geoms: &mut [NodeGeom],
+    way_x: &mut [usize],
+    node_envelopes: &[usize],
+    way_envelopes: &[usize],
+    initial_canvas_w: usize,
+) -> usize {
+    let rank_span = |cells: &[Cell], geoms: &[NodeGeom], way_x: &[usize]| -> usize {
+        let Some(first) = cells.first() else { return 0 };
+        let Some(last) = cells.last() else { return 0 };
+        let (left, _) = cell_bounds(first, geoms, way_x, node_envelopes, way_envelopes);
+        let (_, right) = cell_bounds(last, geoms, way_x, node_envelopes, way_envelopes);
+        right.saturating_sub(left)
+    };
+
+    let anchor = orders
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, cells)| rank_span(cells, geoms, way_x))
+        .map(|(rank, _)| rank)
+        .unwrap_or(0);
+
+    for rank in (0..anchor).rev() {
+        align_rank_toward(
+            model,
+            &orders[rank],
+            geoms,
+            way_x,
+            node_envelopes,
+            way_envelopes,
+            true,
+        );
+    }
+    for cells in orders.iter().skip(anchor + 1) {
+        align_rank_toward(
+            model,
+            cells,
+            geoms,
+            way_x,
+            node_envelopes,
+            way_envelopes,
+            false,
+        );
+    }
+
+    let right = orders
+        .iter()
+        .flatten()
+        .map(|cell| cell_bounds(cell, geoms, way_x, node_envelopes, way_envelopes).1)
+        .max()
+        .unwrap_or(MARGIN_X + initial_canvas_w);
+    initial_canvas_w.max(right.saturating_sub(MARGIN_X))
+}
+
+fn align_rank_toward(
+    model: &Model,
+    cells: &[Cell],
+    geoms: &mut [NodeGeom],
+    way_x: &mut [usize],
+    node_envelopes: &[usize],
+    way_envelopes: &[usize],
+    toward_children: bool,
+) {
+    let mut neighbors: HashSet<usize> = HashSet::new();
+    for cell in cells {
+        let Cell::Node(node) = cell else { continue };
+        for edge in &model.edges {
+            let neighbor = if toward_children && edge.from == *node {
+                Some(edge.to)
+            } else if !toward_children && edge.to == *node {
+                Some(edge.from)
+            } else {
+                None
+            };
+            if let Some(neighbor) = neighbor {
+                neighbors.insert(neighbor);
+            }
+        }
+    }
+
+    if neighbors.is_empty() {
+        return;
+    }
+    let left = cells
+        .iter()
+        .map(|cell| cell_bounds(cell, geoms, way_x, node_envelopes, way_envelopes).0)
+        .min()
+        .unwrap_or(MARGIN_X);
+    let right = cells
+        .iter()
+        .map(|cell| cell_bounds(cell, geoms, way_x, node_envelopes, way_envelopes).1)
+        .max()
+        .unwrap_or(left);
+    let mut neighbor_centers: Vec<usize> = neighbors
+        .iter()
+        .map(|neighbor| geoms[*neighbor].x + geoms[*neighbor].w / 2)
+        .collect();
+    neighbor_centers.sort_unstable();
+    let middle = neighbor_centers.len() / 2;
+    let neighbor_center = if neighbor_centers.len().is_multiple_of(2) {
+        (neighbor_centers[middle - 1] + neighbor_centers[middle]) / 2
+    } else {
+        neighbor_centers[middle]
+    };
+    let mut delta = neighbor_center as isize - ((left + right) / 2) as isize;
+    delta = delta.max(MARGIN_X as isize - left as isize);
+
+    if delta == 0 {
+        return;
+    }
+    for cell in cells {
+        match cell {
+            Cell::Node(node) => geoms[*node].x = geoms[*node].x.saturating_add_signed(delta),
+            Cell::Way(way) => way_x[*way] = way_x[*way].saturating_add_signed(delta),
+        }
+    }
+}
+
+fn cell_bounds(
+    cell: &Cell,
+    geoms: &[NodeGeom],
+    way_x: &[usize],
+    node_envelopes: &[usize],
+    way_envelopes: &[usize],
+) -> (usize, usize) {
+    match cell {
+        Cell::Node(node) => {
+            let width = node_envelopes[*node].max(geoms[*node].w);
+            let left = geoms[*node].x.saturating_sub((width - geoms[*node].w) / 2);
+            (left, left + width)
+        }
+        Cell::Way(way) => {
+            let width = way_envelopes[*way].max(1);
+            let left = way_x[*way].saturating_sub(width / 2);
+            (left, left + width)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,20 +1450,50 @@ fn assign_ports(
         g.x + 1 + (interior * (slot + 1)) / (k + 1)
     };
 
-    for (node, mut list) in by_source {
-        list.sort_by_key(|&i| (end_center(segs[i].to), segs[i].chain));
-        let k = list.len();
-        for (slot, &i) in list.iter().enumerate() {
-            segs[i].sx = spread(&geoms[node], k, slot);
+    for (node, list) in by_source {
+        let mut groups = endpoint_groups(list, segs, |seg| end_center(seg.to));
+        groups.sort_by_key(|group| group.iter().map(|&i| end_center(segs[i].to)).min());
+        let k = groups.len();
+        for (slot, group) in groups.iter().enumerate() {
+            let port = spread(&geoms[node], k, slot);
+            for &i in group {
+                segs[i].sx = port;
+            }
         }
     }
-    for (node, mut list) in by_target {
-        list.sort_by_key(|&i| (end_center(segs[i].from), segs[i].chain));
-        let k = list.len();
-        for (slot, &i) in list.iter().enumerate() {
-            segs[i].tx = spread(&geoms[node], k, slot);
+    for (node, list) in by_target {
+        let mut groups = endpoint_groups(list, segs, |seg| end_center(seg.from));
+        groups.sort_by_key(|group| group.iter().map(|&i| end_center(segs[i].from)).min());
+        let k = groups.len();
+        for (slot, group) in groups.iter().enumerate() {
+            let port = spread(&geoms[node], k, slot);
+            for &i in group {
+                segs[i].tx = port;
+            }
         }
     }
+}
+
+/// Edges of the same kind that share an endpoint also share a physical port.
+/// The resulting common trunk reads as one fan-out or fan-in relationship.
+fn endpoint_groups(
+    mut indices: Vec<usize>,
+    segs: &[Seg],
+    opposite_center: impl Fn(&Seg) -> usize,
+) -> Vec<Vec<usize>> {
+    indices.sort_by_key(|&i| (opposite_center(&segs[i]), segs[i].chain));
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for index in indices {
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| segs[group[0]].kind == segs[index].kind)
+        {
+            group.push(index);
+        } else {
+            groups.push(vec![index]);
+        }
+    }
+    groups
 }
 
 /// Straight segments own their column for the full channel height; no other
@@ -1031,22 +1505,34 @@ fn nudge_conflicts(
     _way_x: &[usize],
 ) -> Result<(), DiagramError> {
     for _round in 0..16 {
-        let straight_cols: HashSet<usize> = segs
+        let straight: Vec<(usize, usize)> = segs
             .iter()
-            .filter(|s| s.is_straight())
-            .map(|s| s.sx)
+            .enumerate()
+            .filter(|(_, s)| s.is_straight())
+            .map(|(index, s)| (index, s.sx))
             .collect();
+        let straight_cols: HashSet<usize> = straight.iter().map(|(_, column)| *column).collect();
 
         let mut conflict: Option<(usize, bool)> = None; // (seg idx, fix_source)
         for (i, seg) in segs.iter().enumerate() {
             if seg.is_straight() {
                 continue;
             }
-            if straight_cols.contains(&seg.sx) {
+            let shared_source = straight.iter().any(|&(straight_index, column)| {
+                column == seg.sx
+                    && segs[straight_index].from == seg.from
+                    && segs[straight_index].kind == seg.kind
+            });
+            let shared_target = straight.iter().any(|&(straight_index, column)| {
+                column == seg.tx
+                    && segs[straight_index].to == seg.to
+                    && segs[straight_index].kind == seg.kind
+            });
+            if straight_cols.contains(&seg.sx) && !shared_source {
                 conflict = Some((i, true));
                 break;
             }
-            if straight_cols.contains(&seg.tx) {
+            if straight_cols.contains(&seg.tx) && !shared_target {
                 conflict = Some((i, false));
                 break;
             }
@@ -1101,9 +1587,9 @@ fn nudge_conflicts(
     ))
 }
 
-/// One segment per lane. Order is a topological sort of the precedence
-/// constraint "S descends at the column T rises in" (S.sx == T.tx => S above T),
-/// tie-broken by leftmost interval for stable output.
+/// Assign compact routing lanes. Segments with a shared source or target port
+/// become one routing unit, giving fan-out and fan-in a common bus. Independent
+/// units reuse a lane when their horizontal intervals do not overlap.
 fn assign_lanes(segs: &mut [Seg], model: &Model) -> Result<(), DiagramError> {
     let laned: Vec<usize> = segs
         .iter()
@@ -1116,38 +1602,91 @@ fn assign_lanes(segs: &mut [Seg], model: &Model) -> Result<(), DiagramError> {
         return Ok(());
     }
 
-    // precedence[a] contains b  =>  lane(a) < lane(b)
-    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut indeg = vec![0usize; n];
-    for (ai, &a) in laned.iter().enumerate() {
-        for (bi, &b) in laned.iter().enumerate() {
-            if ai != bi && segs[a].sx == segs[b].tx {
-                succs[ai].push(bi);
-                indeg[bi] += 1;
+    struct RouteUnit {
+        segments: Vec<usize>,
+        lo: usize,
+        hi: usize,
+    }
+
+    let mut remaining: HashSet<usize> = laned.iter().copied().collect();
+    let mut units: Vec<RouteUnit> = Vec::new();
+    while let Some(&seed) = remaining.iter().min() {
+        let source_group: Vec<usize> = remaining
+            .iter()
+            .copied()
+            .filter(|&i| segs[i].from == segs[seed].from && segs[i].kind == segs[seed].kind)
+            .collect();
+        let target_group: Vec<usize> = remaining
+            .iter()
+            .copied()
+            .filter(|&i| segs[i].to == segs[seed].to && segs[i].kind == segs[seed].kind)
+            .collect();
+        let members = if source_group.len() > 1 {
+            source_group
+        } else if target_group.len() > 1 {
+            target_group
+        } else {
+            vec![seed]
+        };
+        for member in &members {
+            remaining.remove(member);
+        }
+        let lo = members
+            .iter()
+            .map(|&i| segs[i].sx.min(segs[i].tx))
+            .min()
+            .unwrap();
+        let hi = members
+            .iter()
+            .map(|&i| segs[i].sx.max(segs[i].tx))
+            .max()
+            .unwrap();
+        units.push(RouteUnit {
+            segments: members,
+            lo,
+            hi,
+        });
+    }
+
+    // precedence[a] contains b => unit a must route above unit b because one
+    // unit descends at the column where the other rises.
+    let unit_count = units.len();
+    let mut succs: Vec<Vec<usize>> = vec![Vec::new(); unit_count];
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); unit_count];
+    let mut indeg = vec![0usize; unit_count];
+    for a in 0..unit_count {
+        for b in 0..unit_count {
+            if a == b {
+                continue;
+            }
+            let precedes = units[a].segments.iter().any(|&ai| {
+                units[b]
+                    .segments
+                    .iter()
+                    .any(|&bi| segs[ai].sx == segs[bi].tx)
+            });
+            if precedes && !succs[a].contains(&b) {
+                succs[a].push(b);
+                preds[b].push(a);
+                indeg[b] += 1;
             }
         }
     }
 
-    let mut ready: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
-    let mut order: Vec<usize> = Vec::with_capacity(n);
+    let mut ready: Vec<usize> = (0..unit_count).filter(|&i| indeg[i] == 0).collect();
+    let mut order: Vec<usize> = Vec::with_capacity(unit_count);
     while !ready.is_empty() {
-        // Deterministic: smallest leftmost interval first.
-        ready.sort_by_key(|&i| {
-            let s = &segs[laned[i]];
-            (s.sx.min(s.tx), s.sx.max(s.tx), s.chain)
-        });
+        ready.sort_by_key(|&i| (units[i].lo, units[i].hi, units[i].segments[0]));
         let i = ready.remove(0);
         order.push(i);
-        for &j in &succs[i].clone() {
+        for &j in &succs[i] {
             indeg[j] -= 1;
             if indeg[j] == 0 {
                 ready.push(j);
             }
         }
     }
-    if order.len() != n {
-        // A precedence cycle means two segments swap columns; this needs the
-        // port nudging to break it — rare enough to refuse loudly for now.
+    if order.len() != unit_count {
         let ids: Vec<String> = laned
             .iter()
             .map(|&i| {
@@ -1162,8 +1701,32 @@ fn assign_lanes(segs: &mut [Seg], model: &Model) -> Result<(), DiagramError> {
         )));
     }
 
-    for (lane, &i) in order.iter().enumerate() {
-        segs[laned[i]].lane = Some(lane);
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    let mut unit_lane: Vec<Option<usize>> = vec![None; unit_count];
+    for unit in order {
+        let min_lane = preds[unit]
+            .iter()
+            .filter_map(|&pred| unit_lane[pred])
+            .map(|lane| lane + 1)
+            .max()
+            .unwrap_or(0);
+        let lane = (min_lane..)
+            .find(|&candidate| {
+                lanes.get(candidate).is_none_or(|occupants| {
+                    occupants.iter().all(|&other| {
+                        units[unit].hi + 1 < units[other].lo || units[other].hi + 1 < units[unit].lo
+                    })
+                })
+            })
+            .unwrap();
+        if lane == lanes.len() {
+            lanes.push(Vec::new());
+        }
+        lanes[lane].push(unit);
+        unit_lane[unit] = Some(lane);
+        for &segment in &units[unit].segments {
+            segs[segment].lane = Some(lane);
+        }
     }
     Ok(())
 }

@@ -428,7 +428,13 @@ mod tests {
             absolutize("/abs/main.rs", Some("/repo")),
             PathBuf::from("/abs/main.rs")
         );
-        assert_eq!(absolutize("src/main.rs", None), PathBuf::from("src/main.rs"));
-        assert_eq!(absolutize("src/main.rs", Some("")), PathBuf::from("src/main.rs"));
+        assert_eq!(
+            absolutize("src/main.rs", None),
+            PathBuf::from("src/main.rs")
+        );
+        assert_eq!(
+            absolutize("src/main.rs", Some("")),
+            PathBuf::from("src/main.rs")
+        );
     }
 }

@@ -99,6 +99,91 @@ mod tests {
         haystack.match_indices(needle).count()
     }
 
+    fn target_ownership_src() -> &'static str {
+        r#"{
+          "title": "Target ownership",
+          "nodes": [
+            {"id": "clients", "label": "Product clients", "kind": "external"},
+            {"id": "bff", "label": "BFF"},
+            {"id": "users", "label": "Users Service"},
+            {"id": "sg", "label": "Server Global"},
+            {"id": "msusers", "label": "msUsers"},
+            {"id": "cognito", "label": "Cognito"}
+          ],
+          "edges": [
+            {"from": "clients", "to": "bff", "label": "account and auth API"},
+            {"from": "bff", "to": "users", "label": "accounts"},
+            {"from": "bff", "to": "sg", "label": "business context"},
+            {"from": "bff", "to": "msusers", "label": "authorization"},
+            {"from": "users", "to": "cognito", "label": "identity provider"}
+          ],
+          "notes": [
+            {"on": "users", "text": "Account profile, credentials, verification, and access state"},
+            {"on": "sg", "text": "Businesses, memberships, invitations, and compatibility projection"},
+            {"on": "msusers", "text": "Product roles and permissions"}
+          ],
+          "hints": {
+            "ranks": [["clients"], ["bff"], ["users", "sg", "msusers"], ["cognito"]]
+          }
+        }"#
+    }
+
+    fn descriptive_bundles_src() -> &'static str {
+        r#"{
+          "title": "descriptive bundled edges",
+          "nodes": [
+            {"id": "source", "label": "Source", "kind": "external"},
+            {"id": "left", "label": "Adapter A"},
+            {"id": "right", "label": "Adapter B"},
+            {"id": "broker", "label": "Broker"},
+            {"id": "metadata", "label": "Metadata", "kind": "store"},
+            {"id": "runtime", "label": "Runtime"},
+            {"id": "engine", "label": "Engine"},
+            {"id": "target", "label": "Target", "kind": "external"}
+          ],
+          "edges": [
+            {"from": "source", "to": "left", "label": "invoke semantic operation"},
+            {"from": "source", "to": "right", "label": "invoke management operation"},
+            {"from": "left", "to": "broker", "label": "forward identity and action"},
+            {"from": "right", "to": "broker", "label": "forward lifecycle operation"},
+            {"from": "broker", "to": "metadata", "label": "persist ownership metadata"},
+            {"from": "broker", "to": "runtime", "label": "start or stop managed runtime"},
+            {"from": "runtime", "to": "engine", "label": "open command transport"},
+            {"from": "engine", "to": "target", "label": "inspect and control target"}
+          ],
+          "hints": {
+            "ranks": [
+              ["source"],
+              ["left", "right"],
+              ["broker"],
+              ["metadata", "runtime"],
+              ["engine"],
+              ["target"]
+            ]
+          }
+        }"#
+    }
+
+    fn plain_lines(src: &str, viewport: usize) -> Vec<String> {
+        render_json_in(src, viewport)
+            .expect("render should succeed")
+            .lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect()
+    }
+
+    fn text_position(lines: &[String], needle: &str) -> (usize, usize) {
+        lines
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| {
+                line.find(needle)
+                    .map(|byte| (line[..byte].chars().count(), y))
+            })
+            .unwrap_or_else(|| panic!("rendered diagram is missing `{needle}`"))
+    }
+
     #[test]
     fn simple_chain() {
         let text = render_plain(
@@ -166,7 +251,229 @@ mod tests {
               ]
             }"#,
         );
-        assert_eq!(count(&text, "▼"), 3, "three distinct ports, three arrows");
+        assert_eq!(
+            count(&text, "▼"),
+            1,
+            "fan-in branches share one target trunk and arrowhead"
+        );
+    }
+
+    #[test]
+    fn labeled_fan_in_centers_labels_on_source_branches() {
+        let lines = plain_lines(
+            r#"{
+              "nodes": [
+                {"id": "a", "label": "Service A"},
+                {"id": "b", "label": "Service B"},
+                {"id": "c", "label": "Service C"},
+                {"id": "q", "label": "events", "kind": "queue"}
+              ],
+              "edges": [
+                {"from": "a", "to": "q", "label": "created"},
+                {"from": "b", "to": "q", "label": "updated"},
+                {"from": "c", "to": "q", "label": "deleted"}
+              ]
+            }"#,
+            80,
+        );
+        let (_, source_y) = text_position(&lines, "Service A");
+        let (_, target_y) = text_position(&lines, "events");
+        let mut label_rows = Vec::new();
+
+        for (node, label) in [
+            ("Service A", "created"),
+            ("Service B", "updated"),
+            ("Service C", "deleted"),
+        ] {
+            let (node_x, _) = text_position(&lines, node);
+            let (label_x, label_y) = text_position(&lines, label);
+            assert_eq!(
+                label_x + label.len() / 2,
+                node_x + node.len() / 2,
+                "fan-in label `{label}` should be centered on its source branch"
+            );
+            assert!(label_y > source_y && label_y < target_y);
+            label_rows.push(label_y);
+        }
+
+        assert!(label_rows.windows(2).all(|rows| rows[0] == rows[1]));
+    }
+
+    #[test]
+    fn independent_routes_reuse_a_channel_lane() {
+        let lines = plain_lines(
+            r#"{
+              "nodes": [
+                {"id": "a", "label": "Source A"},
+                {"id": "b", "label": "Source B"},
+                {"id": "c", "label": "Target A"},
+                {"id": "d", "label": "Target B"}
+              ],
+              "edges": [
+                {"from": "a", "to": "c", "label": "left route"},
+                {"from": "b", "to": "d", "label": "right route"}
+              ],
+              "hints": {"ranks": [["a", "b"], ["c", "d"]]}
+            }"#,
+            80,
+        );
+        let (_, source_y) = text_position(&lines, "Source A");
+        let (_, target_y) = text_position(&lines, "Target A");
+
+        assert!(
+            target_y - source_y <= 7,
+            "independent routes should share one channel lane"
+        );
+    }
+
+    #[test]
+    fn target_ownership_aligns_single_parent_chain() {
+        let lines = plain_lines(target_ownership_src(), 80);
+        let users_label = "Users Service [1]";
+        let (users_x, _) = text_position(&lines, users_label);
+        let (cognito_x, _) = text_position(&lines, "Cognito");
+        let users_center = users_x + users_label.len() / 2;
+        let cognito_center = cognito_x + "Cognito".len() / 2;
+
+        assert_eq!(
+            users_center, cognito_center,
+            "a single-child identity provider should align with its parent"
+        );
+    }
+
+    #[test]
+    fn target_ownership_uses_a_branch_label_band() {
+        let lines = plain_lines(target_ownership_src(), 80);
+        let (_, bff_y) = text_position(&lines, "BFF");
+        let (users_x, users_y) = text_position(&lines, "Users Service [1]");
+        let (sg_x, sg_y) = text_position(&lines, "Server Global [2]");
+        let (msusers_x, msusers_y) = text_position(&lines, "msUsers [3]");
+
+        assert_eq!(users_y, sg_y);
+        assert_eq!(sg_y, msusers_y);
+        assert!(
+            users_y - bff_y <= 8,
+            "a three-way fan-out should use one compact routing band"
+        );
+
+        let mut label_rows = Vec::new();
+        for (label, target_x) in [
+            ("accounts", users_x + "Users Service [1]".len() / 2),
+            ("business context", sg_x + "Server Global [2]".len() / 2),
+            ("authorization", msusers_x + "msUsers [3]".len() / 2),
+        ] {
+            let (label_x, label_y) = text_position(&lines, label);
+            let label_center = label_x + label.len() / 2;
+            assert_eq!(
+                label_center, target_x,
+                "branch label `{label}` should be centered on its target branch"
+            );
+            assert!(label_y > bff_y && label_y < users_y);
+            label_rows.push(label_y);
+        }
+        assert!(label_rows.windows(2).all(|rows| rows[0] == rows[1]));
+    }
+
+    #[test]
+    fn target_ownership_fits_common_viewports() {
+        for viewport in [64, 72, 80, 120] {
+            let rendered = render_json_in(target_ownership_src(), viewport)
+                .expect("ownership diagram should render");
+            assert!(
+                rendered.graph_width <= viewport,
+                "ownership diagram needs {} columns at viewport {viewport}",
+                rendered.graph_width
+            );
+        }
+    }
+
+    #[test]
+    fn target_ownership_expands_sibling_spacing_in_wide_viewports() {
+        let narrow = render_json_in(target_ownership_src(), 72).expect("narrow ownership diagram");
+        let wide = render_json_in(target_ownership_src(), 120).expect("wide ownership diagram");
+
+        assert!(
+            wide.graph_width >= narrow.graph_width + 20,
+            "wide viewport should become space between ownership branches"
+        );
+        assert!(wide.graph_width <= 120);
+    }
+
+    #[test]
+    fn descriptive_branch_labels_use_available_viewport_width() {
+        let rendered = render_json_in(descriptive_bundles_src(), 120)
+            .expect("descriptive branch labels should participate in layout");
+        let text = rendered
+            .lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for label in [
+            "invoke semantic operation",
+            "invoke management operation",
+            "forward identity and action",
+            "forward lifecycle operation",
+            "persist ownership metadata",
+            "start or stop managed runtime",
+            "open command transport",
+            "inspect and control target",
+        ] {
+            assert_eq!(count(&text, label), 1, "label `{label}` should render once");
+        }
+        assert!(
+            rendered.graph_width <= 120,
+            "descriptive graph needs {} columns",
+            rendered.graph_width
+        );
+
+        let narrow = render_json_in(descriptive_bundles_src(), 72)
+            .expect("narrow viewports should measure the graph instead of failing routing");
+        assert!(
+            narrow.graph_width <= rendered.graph_width,
+            "narrow viewports should contract decorative spacing"
+        );
+    }
+
+    #[test]
+    fn target_ownership_visual_snapshot() {
+        let actual = plain_lines(target_ownership_src(), 80).join("\n");
+        let expected = r#" Target ownership
+
+                                 ┌─────────────────┐
+                                 │ Product clients │
+                                 └─────────────────┘
+                                          │
+                     account and auth API │
+                                          │
+                                          ▼
+                                      ┌───────┐
+                                      │  BFF  │
+                                      └───────┘
+                                          │
+           ┌──────────────────────────────┼───────────────────────────┐
+       accounts                   business context              authorization
+           ▼                              ▼                           ▼
+ ┌───────────────────┐          ┌───────────────────┐          ┌─────────────┐
+ │ Users Service [1] │          │ Server Global [2] │          │ msUsers [3] │
+ └───────────────────┘          └───────────────────┘          └─────────────┘
+           │
+           │ identity provider
+           │
+           ▼
+      ┌─────────┐
+      │ Cognito │
+      └─────────┘
+
+
+ [1] Users Service — Account profile, credentials, verification, and access
+     state
+ [2] Server Global — Businesses, memberships, invitations, and compatibility
+     projection
+ [3] msUsers — Product roles and permissions"#;
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -186,7 +493,11 @@ mod tests {
             }"#,
         );
         assert_eq!(count(&text, "raw copy"), 1);
-        assert_eq!(count(&text, "▼"), 3, "long edge still lands exactly one arrow");
+        assert_eq!(
+            count(&text, "▼"),
+            3,
+            "long edge still lands exactly one arrow"
+        );
         assert!(text.contains("┆"), "async edge renders dashed");
     }
 
@@ -212,7 +523,10 @@ mod tests {
         assert!(text.contains("[1] SNS topic — ? fan-out consumer TBD"));
         assert!(text.contains("[2] Worker — idempotent"));
         // No rounded note boxes in the graph any more.
-        assert!(!text.contains("╭"), "notes no longer render as inline boxes");
+        assert!(
+            !text.contains("╭"),
+            "notes no longer render as inline boxes"
+        );
     }
 
     #[test]
@@ -233,8 +547,9 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        // a's edge to c crosses b's rank via a waypoint; both arrows land.
-        assert_eq!(count(&text, "▼"), 2);
+        // a's edge to c crosses b's rank via a waypoint. Both semantic edges
+        // converge on one physical target port and share its arrowhead.
+        assert_eq!(count(&text, "▼"), 1);
     }
 
     #[test]
@@ -271,9 +586,17 @@ mod tests {
             "already linked",
             "has account",
         ] {
-            assert_eq!(count(&text, label), 1, "label `{label}` intact exactly once");
+            assert_eq!(
+                count(&text, label),
+                1,
+                "label `{label}` intact exactly once"
+            );
         }
-        assert_eq!(count(&text, "▼"), 8, "every edge lands exactly one arrow");
+        assert_eq!(
+            count(&text, "▼"),
+            7,
+            "the two server-global inputs share one fan-in arrowhead"
+        );
     }
 
     #[test]
@@ -281,7 +604,9 @@ mod tests {
         // The authoring doc's example must always render, or the doc lies.
         let doc = include_str!("../../docs/sketch.md");
         let marker = "```sketch\n";
-        let start = doc.find(marker).expect("docs/sketch.md has a sketch example");
+        let start = doc
+            .find(marker)
+            .expect("docs/sketch.md has a sketch example");
         let body = &doc[start + marker.len()..];
         let end = body.find("```").expect("sketch fence closes");
         render_json(&body[..end]).expect("docs/sketch.md example must render");
@@ -303,10 +628,9 @@ mod tests {
 
     #[test]
     fn error_duplicate_id() {
-        let err = render_json(
-            r#"{"nodes": [{"id": "a", "label": "A"}, {"id": "a", "label": "A2"}]}"#,
-        )
-        .unwrap_err();
+        let err =
+            render_json(r#"{"nodes": [{"id": "a", "label": "A"}, {"id": "a", "label": "A2"}]}"#)
+                .unwrap_err();
         assert!(matches!(err, DiagramError::DuplicateId(id) if id == "a"));
     }
 
@@ -365,6 +689,12 @@ mod tests {
             }"#,
         )
         .unwrap_err();
-        assert!(matches!(err, DiagramError::UnknownRef { context: "note", .. }));
+        assert!(matches!(
+            err,
+            DiagramError::UnknownRef {
+                context: "note",
+                ..
+            }
+        ));
     }
 }

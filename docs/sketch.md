@@ -39,6 +39,27 @@ It renders top to bottom: an external Client into the BFF, into Auth, which writ
 the session store and emits an event onto a queue. Notes become numbered footnotes;
 the `[n]` marker on a node ties it to its footnote.
 
+## Layout behavior
+
+The document describes relationships; the renderer owns their geometry:
+
+- Ranks establish vertical order. Nodes within a rank keep their declared order
+  and align horizontally from their parent and child relationships.
+- Edges of the same kind that share a source or target use a common fan-out or
+  fan-in trunk. Authors still declare each semantic edge separately.
+- Independent routes reuse horizontal lanes when their intervals do not overlap.
+- Fan-out and fan-in labels occupy a branch band between the shared bus and the
+  corresponding nodes. Each label is centered on the branch it describes, and
+  its text width participates in rank placement before routes are drawn.
+- Connected ranks align around the median center of their neighboring nodes.
+  For an even sibling group, the midpoint between the two middle nodes keeps
+  the parent centered over the complete group.
+- Sibling ranks expand into available viewport space up to a readable gap. Narrow
+  viewports reduce that spacing before the graph is considered too wide.
+
+Use `hints.ranks` when the vertical grouping or left-to-right order carries
+meaning. Horizontal coordinates, ports, buses, and labels remain automatic.
+
 ## Schema
 
 `deny_unknown_fields` is on — an unknown key is a hard parse error. The fields:
@@ -81,8 +102,8 @@ the `[n]` marker on a node ties it to its footnote.
   rank order, left-to-right within a rank. Without hints, layers come from
   longest-path layering over the DAG.
 - **Too wide for the viewport → a one-line `◆ sketch` placeholder**, never a truncated
-  diagram. Keep ranks lean (fewer nodes per row, shorter labels) or view in a wider
-  terminal.
+  diagram. The renderer first uses compact spacing for narrow viewports. Keep
+  ranks lean when the node labels themselves exceed the available width.
 
 ## Errors
 
