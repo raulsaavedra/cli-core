@@ -36,10 +36,9 @@ pub fn render_json(src: &str) -> Result<Rendered, DiagramError> {
     render_at(src, usize::MAX)
 }
 
-/// Render with a known viewport so footnote prose wraps to fit instead of
-/// widening the diagram. The graph still lays out at its natural width; a caller
-/// deciding whether the diagram fits should test `graph_width`, not `width`
-/// (which includes the wrapped footnotes).
+/// Render with a known viewport. The layout uses that room to separate peer
+/// branches and center the topology. `graph_width` reports the required canvas;
+/// footnotes wrap independently and may affect `width`.
 pub fn render_json_in(src: &str, viewport: usize) -> Result<Rendered, DiagramError> {
     render_at(src, viewport)
 }
@@ -62,8 +61,6 @@ fn render_at(src: &str, viewport: usize) -> Result<Rendered, DiagramError> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
 
     fn strip_ansi(s: &str) -> String {
@@ -171,15 +168,32 @@ mod tests {
         }"#
     }
 
-    fn text_position(lines: &[String], needle: &str) -> (usize, usize) {
-        lines
+    fn assert_caption_attached(lines: &[String], prefix: &str) {
+        let line = lines
             .iter()
-            .enumerate()
-            .find_map(|(y, line)| {
-                line.find(needle)
-                    .map(|byte| (line[..byte].chars().count(), y))
-            })
-            .unwrap_or_else(|| panic!("rendered diagram is missing `{needle}`"))
+            .find(|line| line.contains(prefix))
+            .unwrap_or_else(|| panic!("rendered diagram is missing caption `{prefix}`"));
+        assert!(
+            line.contains("├─") || line.contains("─┤"),
+            "caption `{prefix}` should attach directly to its relationship branch"
+        );
+    }
+
+    fn normalized_text(lines: &[String]) -> String {
+        lines
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn assert_words_rendered(text: &str, label: &str) {
+        for word in label.split_whitespace() {
+            assert!(
+                text.contains(word),
+                "caption `{label}` is missing word `{word}`"
+            );
+        }
     }
 
     #[test]
@@ -257,77 +271,53 @@ mod tests {
     }
 
     #[test]
-    fn dual_bundles_keep_semantic_edges_on_distinct_connectors() {
+    fn dual_bundles_keep_every_relationship_caption_attached() {
         let rendered = render_json_in(dual_bundle_src(), 120)
             .expect("dual source and target bundles should route without false junctions");
         let lines: Vec<String> = rendered.lines.iter().map(|line| strip_ansi(line)).collect();
-        let text = lines.join("\n");
+        let text = normalized_text(&lines);
 
-        for label in [
-            "incoming request",
-            "direct management",
-            "delegated access",
-            "account operation",
-            "domain operation",
-            "identity state",
-            "access policy",
-            "state projection",
+        for (label, prefix) in [
+            ("incoming request", "incoming"),
+            ("direct management", "direct"),
+            ("delegated access", "delegated"),
+            ("account operation", "account"),
+            ("domain operation", "domain"),
+            ("identity state", "identity"),
+            ("access policy", "access"),
+            ("state projection", "state"),
         ] {
-            assert_eq!(count(&text, label), 1, "label `{label}` should render once");
+            assert_words_rendered(&text, label);
+            assert_caption_attached(&lines, prefix);
         }
-
-        let first_channel_rows: HashSet<usize> =
-            ["incoming request", "direct management", "delegated access"]
-                .into_iter()
-                .map(|label| text_position(&lines, label).1)
-                .collect();
-        assert_eq!(
-            first_channel_rows.len(),
-            3,
-            "each semantic edge should keep its own connector row"
-        );
         assert!(text.contains('┄') || text.contains('┆'));
-        assert!(
-            text.contains('╪'),
-            "independent routes should cross as an overpass, not a junction"
-        );
     }
 
     #[test]
-    fn descriptive_branch_labels_use_available_viewport_width() {
+    fn descriptive_branches_use_attached_wrapped_captions() {
         let rendered = render_json_in(descriptive_bundles_src(), 120)
             .expect("descriptive branch labels should participate in layout");
-        let text = rendered
+        let lines = rendered
             .lines
             .iter()
             .map(|line| strip_ansi(line))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        let text = normalized_text(&lines);
 
-        for label in [
-            "invoke semantic operation",
-            "invoke management operation",
-            "forward identity and action",
-            "forward lifecycle operation",
-            "persist ownership metadata",
-            "start or stop managed runtime",
-            "open command transport",
-            "inspect and control target",
+        for (label, prefix) in [
+            ("invoke semantic operation", "semantic"),
+            ("invoke management operation", "management"),
+            ("forward identity and action", "identity"),
+            ("forward lifecycle operation", "lifecycle"),
+            ("persist ownership metadata", "persist"),
+            ("start or stop managed runtime", "start"),
+            ("open command transport", "open"),
+            ("inspect and control target", "inspect"),
         ] {
-            assert_eq!(count(&text, label), 1, "label `{label}` should render once");
+            assert_words_rendered(&text, label);
+            assert_caption_attached(&lines, prefix);
         }
-        assert!(
-            rendered.graph_width <= 120,
-            "descriptive graph needs {} columns",
-            rendered.graph_width
-        );
-
-        let narrow = render_json_in(descriptive_bundles_src(), 72)
-            .expect("narrow viewports should measure the graph instead of failing routing");
-        assert!(
-            narrow.graph_width <= rendered.graph_width,
-            "narrow viewports should contract decorative spacing"
-        );
+        assert_eq!(rendered.graph_width, 120);
     }
 
     #[test]
@@ -401,8 +391,8 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        // a's edge to c crosses b's rank via a waypoint. Both semantic edges
-        // converge on one physical target port and share its arrowhead.
+        // A reaches C through a clear interior track across B's rank. Both
+        // relationships converge on one target port and share its arrowhead.
         assert_eq!(count(&text, "▼"), 1);
     }
 
@@ -440,11 +430,7 @@ mod tests {
             "already linked",
             "has account",
         ] {
-            assert_eq!(
-                count(&text, label),
-                1,
-                "label `{label}` intact exactly once"
-            );
+            assert_words_rendered(&text, label);
         }
         assert_eq!(
             count(&text, "▼"),

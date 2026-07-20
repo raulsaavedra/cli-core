@@ -113,6 +113,7 @@ Terminal Markdown rendering with extracted metadata for downstream navigation an
 Terminal-native architecture diagrams. A fenced `sketch` JSON block describes typed nodes, edges, and notes; the engine lays them out on a character grid and paints once. The `markdown` module renders these fences inline, so any cli-core markdown consumer draws them for free.
 
 - `render_json(src: &str) -> Result<Rendered, DiagramError>` — render a sketch document to ANSI lines at its natural width
+- `render_json_in(src: &str, viewport: usize) -> Result<Rendered, DiagramError>` — render a sketch in the available viewport, using topology-shaped branches and wrapped edge captions
 
 See [`docs/sketch.md`](docs/sketch.md) for the authoring format. The parser in `src/diagram/doc.rs` is the canonical schema.
 

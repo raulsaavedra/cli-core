@@ -43,24 +43,24 @@ the `[n]` marker on a node ties it to its footnote.
 
 The document describes relationships; the renderer owns their geometry:
 
-- Ranks establish vertical order. Nodes within a rank keep their declared order
-  and align horizontally from their parent and child relationships.
-- Edges of the same kind that share an endpoint also share its physical port and
-  trunk. Each declared edge then receives its own connector row, including an
-  edge that belongs to both a fan-out bundle and a fan-in bundle.
-- Labels sit inside their edge's horizontal connector when space permits. A
-  longer label receives a dedicated row immediately above that connector, and
-  its text width participates in layout before anything is drawn.
-- An edge that skips an authored rank travels through a margin gutter instead
-  of crossing through the intervening nodes.
+- Ranks establish vertical stages. Nodes within a rank keep their declared
+  left-to-right order and form a compact block aligned toward connected ranks.
+- Each node owns a horizontal territory for its box and nearby relationship
+  captions. Available viewport width increases separation between peer branches
+  until those territories read clearly; remaining width becomes outer margin.
+- Same-kind relationships that share a source use one split trunk and bus.
+  Same-kind relationships that share a target use one merge bus and trunk.
+- Every relationship keeps a vertical branch through the channel. Its label
+  wraps to the branch's available territory and connects to that branch with a
+  visible tee, so text remains spatially tied to the relationship it describes.
+- A relationship that skips authored ranks follows the nearest clear interior
+  track through those rank bands. The track stays close to its source and target
+  branch.
 - Fixed node order can make some routes cross. A `╪` marks two independent
   routes passing over one another; junction glyphs are reserved for shared
   endpoint bundles.
-- Connected ranks align around the median center of their neighboring nodes.
-  For an even sibling group, the midpoint between the two middle nodes keeps
-  the parent centered over the complete group.
-- Sibling ranks expand into available viewport space up to a readable gap. Narrow
-  viewports reduce that spacing before the graph is considered too wide.
+- Notes render below the graph as numbered, hanging-indent paragraphs at a
+  readable caption width. Their prose does not widen the graph.
 
 Use `hints.ranks` when the vertical grouping or left-to-right order carries
 meaning. Horizontal coordinates, ports, buses, and labels remain automatic.
@@ -107,8 +107,8 @@ meaning. Horizontal coordinates, ports, buses, and labels remain automatic.
   rank order, left-to-right within a rank. Without hints, layers come from
   longest-path layering over the DAG.
 - **Too wide for the viewport → a one-line `◆ sketch` placeholder**, never a truncated
-  diagram. The renderer first uses compact spacing for narrow viewports. Keep
-  ranks lean when the node labels themselves exceed the available width.
+  diagram. Node territories and relationship branches determine the required
+  width, so keep authored ranks lean enough for the intended reading surface.
 
 ## Errors
 

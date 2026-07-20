@@ -3432,10 +3432,14 @@ mod tests {
         );
         assert!(plain.contains("[1] A —"), "footnote anchor renders");
         assert!(plain.contains("deliberately"), "footnote text is present");
-        // The footnote wraps to the caption width (the readable floor for a tiny
-        // diagram), not the full viewport — so it never sprawls edge-to-edge.
-        let max = result
+        // Footnotes use a readable caption width beneath the graph. Measure the
+        // footnote block independently from the wider branch layout above it.
+        let footnote_start = result
             .plain
+            .iter()
+            .position(|line| line.contains("[1] A —"))
+            .expect("footnote anchor line");
+        let max = result.plain[footnote_start..]
             .iter()
             .map(|l| l.chars().count())
             .max()
