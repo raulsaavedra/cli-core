@@ -1,14 +1,14 @@
 //! Topology-shaped horizontal placement.
 //!
-//! Each rank forms a compact block of node territories. Territories reserve
-//! enough room for node boxes and nearby relationship captions. Alternating
+//! Each rank forms a coherent block of node territories. Territories reserve
+//! enough room for node boxes and measured relationship captions. Alternating
 //! alignment sweeps move complete rank blocks toward their connected neighbors
-//! while preserving authored order. Long edges receive the nearest clear
-//! interior track through intervening ranks.
+//! while preserving authored order. Long edges receive the nearest corridor that
+//! clears every intervening rank as a complete obstacle.
 
 use std::collections::HashSet;
 
-use super::{NodeGeom, CAPTION_TRACK_WIDTH, MARGIN_X};
+use super::{caption_width, NodeGeom, CAPTION_ATTACHMENT_SPAN, MARGIN_X};
 use crate::diagram::doc::{DiagramError, Model};
 
 const MIN_NODE_GAP: usize = 6;
@@ -95,9 +95,9 @@ pub(super) fn place(
 fn node_territories(model: &Model, nodes: &[NodeGeom]) -> Vec<usize> {
     let mut territories: Vec<usize> = nodes.iter().map(|node| node.w).collect();
     for edge in &model.edges {
-        if edge.label.is_some() {
-            territories[edge.from] = territories[edge.from].max(CAPTION_TRACK_WIDTH);
-            territories[edge.to] = territories[edge.to].max(CAPTION_TRACK_WIDTH);
+        if let Some(label) = &edge.label {
+            let caption_territory = caption_width(label) + CAPTION_ATTACHMENT_SPAN + 1;
+            territories[edge.to] = territories[edge.to].max(caption_territory);
         }
     }
     territories
@@ -115,17 +115,27 @@ fn minimum_channel_width(model: &Model) -> usize {
             .collect();
         let labeled = active
             .iter()
-            .filter(|edge| model.nodes[edge.to].rank == channel + 1 && edge.label.is_some())
-            .count();
-        if labeled == 0 {
+            .filter_map(|edge| {
+                (model.nodes[edge.to].rank == channel + 1)
+                    .then_some(edge.label.as_deref())
+                    .flatten()
+            })
+            .map(caption_width)
+            .collect::<Vec<_>>();
+        if labeled.is_empty() {
             continue;
         }
 
         let gaps = active.len().saturating_sub(1);
-        let caption_gaps = gaps.min(labeled * 2);
-        let compact_gaps = gaps - caption_gaps;
-        let span = caption_gaps * CAPTION_TRACK_WIDTH + compact_gaps * TRACK_SEPARATION;
-        let outer_caption_room = 2 * (super::MIN_CAPTION_WIDTH + 3);
+        let caption_gaps = gaps.min(labeled.len() * 2);
+        let plain_gaps = gaps - caption_gaps;
+        let widest_caption = labeled
+            .into_iter()
+            .max()
+            .unwrap_or(super::MIN_CAPTION_WIDTH);
+        let caption_span = widest_caption + CAPTION_ATTACHMENT_SPAN + 1;
+        let span = caption_gaps * caption_span + plain_gaps * TRACK_SEPARATION;
+        let outer_caption_room = 2 * caption_span;
         required = required.max(span + outer_caption_room);
     }
     required
@@ -231,12 +241,6 @@ fn place_long_tracks(
 ) -> Result<Vec<Track>, DiagramError> {
     let mut tracks = Vec::new();
     let mut occupied = HashSet::new();
-    let graph_left = nodes.iter().map(|node| node.x).min().unwrap_or(MARGIN_X);
-    let graph_right = nodes
-        .iter()
-        .map(|node| node.x + node.w - 1)
-        .max()
-        .unwrap_or(width.saturating_sub(MARGIN_X + 1));
 
     for (edge_index, edge) in model.edges.iter().enumerate() {
         let source_rank = model.nodes[edge.from].rank;
@@ -253,17 +257,35 @@ fn place_long_tracks(
                     .iter()
                     .any(|track: &usize| track.abs_diff(*candidate) < TRACK_SEPARATION)
                     && (source_rank + 1..target_rank).all(|rank| {
-                        model.ranks[rank].iter().all(|node| {
-                            let left = nodes[*node].x.saturating_sub(TRACK_CLEARANCE);
-                            let right = nodes[*node].x + nodes[*node].w - 1 + TRACK_CLEARANCE;
-                            *candidate < left || *candidate > right
-                        })
+                        let left = model.ranks[rank]
+                            .iter()
+                            .map(|node| nodes[*node].x)
+                            .min()
+                            .unwrap_or(MARGIN_X)
+                            .saturating_sub(TRACK_CLEARANCE);
+                        let right = model.ranks[rank]
+                            .iter()
+                            .map(|node| nodes[*node].x + nodes[*node].w - 1)
+                            .max()
+                            .unwrap_or(width.saturating_sub(MARGIN_X + 1))
+                            + TRACK_CLEARANCE;
+                        *candidate < left || *candidate > right
                     })
             })
             .min_by_key(|candidate| {
-                let outside = usize::from(*candidate < graph_left || *candidate > graph_right);
+                let crossings = tracks
+                    .iter()
+                    .filter(|track: &&Track| {
+                        let crosses_source_rank =
+                            track.source_rank < source_rank && track.target_rank > source_rank;
+                        let crosses_target_rank =
+                            track.source_rank < target_rank && track.target_rank > target_rank;
+                        (crosses_source_rank && between(track.x, source, *candidate))
+                            || (crosses_target_rank && between(track.x, target, *candidate))
+                    })
+                    .count();
                 (
-                    outside,
+                    crossings,
                     candidate.abs_diff(target) * 2 + candidate.abs_diff(source),
                     candidate.abs_diff(target),
                     *candidate,
@@ -271,7 +293,7 @@ fn place_long_tracks(
             })
             .ok_or_else(|| {
                 DiagramError::Routing(format!(
-                    "no clear interior track from `{}` to `{}`",
+                    "no clear rank corridor from `{}` to `{}`",
                     model.nodes[edge.from].id, model.nodes[edge.to].id
                 ))
             })?;
@@ -287,6 +309,10 @@ fn place_long_tracks(
     Ok(tracks)
 }
 
+fn between(value: usize, a: usize, b: usize) -> bool {
+    value > a.min(b) && value < a.max(b)
+}
+
 fn median(values: &mut [usize]) -> usize {
     values.sort_unstable();
     let middle = values.len() / 2;
@@ -294,5 +320,56 @@ fn median(values: &mut [usize]) -> usize {
         (values[middle - 1] + values[middle]) / 2
     } else {
         values[middle]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagram::doc::{EdgeKind, Model, ModelEdge, ModelNode, NodeKind};
+
+    #[test]
+    fn long_track_clears_the_intervening_rank_instead_of_the_whole_graph() {
+        let model = Model {
+            title: None,
+            ticket: None,
+            nodes: vec![
+                ModelNode {
+                    id: "source".into(),
+                    label: "Source".into(),
+                    kind: NodeKind::Service,
+                    rank: 0,
+                },
+                ModelNode {
+                    id: "middle".into(),
+                    label: "Middle".into(),
+                    kind: NodeKind::Service,
+                    rank: 1,
+                },
+                ModelNode {
+                    id: "target".into(),
+                    label: "Target".into(),
+                    kind: NodeKind::Service,
+                    rank: 2,
+                },
+            ],
+            edges: vec![ModelEdge {
+                from: 0,
+                to: 2,
+                label: Some("long relationship".into()),
+                kind: EdgeKind::Sync,
+            }],
+            notes: Vec::new(),
+            ranks: vec![vec![0], vec![1], vec![2]],
+        };
+        let nodes = vec![
+            NodeGeom::test_at(40, 11),
+            NodeGeom::test_at(60, 11),
+            NodeGeom::test_at(90, 11),
+        ];
+
+        let tracks = place_long_tracks(&model, &nodes, 120).expect("rank corridor should fit");
+
+        assert_eq!(tracks[0].x, nodes[2].center());
     }
 }

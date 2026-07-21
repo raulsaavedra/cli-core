@@ -1,29 +1,25 @@
 //! Local orthogonal routing between adjacent node ranks.
 //!
-//! Every channel has three visual regions: source-side split buses, a vertical
-//! branch field, and target-side merge buses. A labeled relationship uses its
-//! final branch as an inline caption track before reaching the target-side bus.
+//! Every channel has source-side route lanes, a vertical branch field, and
+//! target-side route lanes. Each relationship keeps distinct geometry from its
+//! source port through its caption branch and into its target-box ingress.
 
 use std::collections::{HashMap, HashSet};
 
 use super::placement::Track;
-use super::{NodeGeom, Op, CAPTION_TRACK_WIDTH, MARGIN_X, MIN_CAPTION_WIDTH};
+use super::{
+    caption_width, NodeGeom, Op, CAPTION_ATTACHMENT_SPAN, MARGIN_X, MAX_CAPTION_WIDTH,
+    MIN_CAPTION_WIDTH,
+};
 use crate::diagram::doc::{DiagramError, EdgeKind, Model};
 use crate::diagram::grid::{Style, E, N, S, W};
 
-const MAX_CAPTION_WIDTH: usize = 32;
 const UNLABELED_TRACK_GAP: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum End {
     Node(usize),
     Track(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct BundleKey {
-    end: End,
-    kind: EdgeKind,
 }
 
 struct Segment {
@@ -38,20 +34,6 @@ struct Segment {
 }
 
 impl Segment {
-    fn source_key(&self) -> BundleKey {
-        BundleKey {
-            end: self.from,
-            kind: self.kind,
-        }
-    }
-
-    fn target_key(&self) -> BundleKey {
-        BundleKey {
-            end: self.to,
-            kind: self.kind,
-        }
-    }
-
     fn dashed(&self) -> bool {
         matches!(self.kind, EdgeKind::Async | EdgeKind::Event)
     }
@@ -63,6 +45,30 @@ impl Segment {
             Style::EdgeLine
         }
     }
+
+    fn branch_style(&self) -> Style {
+        if self.kind == EdgeKind::Event {
+            Style::EdgeLineEvent
+        } else {
+            Style::EdgeBranch
+        }
+    }
+
+    fn label_style(&self) -> Style {
+        if self.kind == EdgeKind::Event {
+            Style::EdgeLabelEvent
+        } else {
+            Style::EdgeLabel
+        }
+    }
+
+    fn ingress_style(&self) -> Style {
+        if self.kind == EdgeKind::Event {
+            Style::IngressEvent
+        } else {
+            Style::Ingress
+        }
+    }
 }
 
 struct LocalStroke {
@@ -70,22 +76,27 @@ struct LocalStroke {
     dashed: bool,
     style: Style,
     edge: usize,
-    source: BundleKey,
-    target: BundleKey,
 }
 
 struct LocalLabel {
     x: usize,
     y: usize,
     text: String,
+    style: Style,
 }
 
 pub(super) struct ChannelPlan {
     pub height: usize,
+    pub ingresses: Vec<Ingress>,
     strokes: Vec<LocalStroke>,
-    arrows: Vec<(usize, usize)>,
     crossovers: Vec<(usize, usize)>,
     labels: Vec<LocalLabel>,
+}
+
+pub(super) struct Ingress {
+    pub node: usize,
+    pub x: usize,
+    pub style: Style,
 }
 
 impl ChannelPlan {
@@ -105,15 +116,12 @@ impl ChannelPlan {
         for (x, y) in self.crossovers {
             ops.push(Op::Crossover { x, y: y + top });
         }
-        for (x, y) in self.arrows {
-            ops.push(Op::Arrow { x, y: y + top });
-        }
         for label in self.labels {
             ops.push(Op::Text {
                 x: label.x,
                 y: label.y + top,
                 text: label.text,
-                style: Style::EdgeLabel,
+                style: label.style,
             });
         }
         ops
@@ -147,12 +155,12 @@ pub(super) fn route(
             let from = if channel == source_rank {
                 End::Node(edge.from)
             } else {
-                End::Track(track.expect("long edge has an interior track"))
+                End::Track(track.expect("long edge has a rank corridor"))
             };
             let to = if channel + 1 == target_rank {
                 End::Node(edge.to)
             } else {
-                End::Track(track.expect("long edge has an interior track"))
+                End::Track(track.expect("long edge has a rank corridor"))
             };
             segments.push(Segment {
                 edge: edge_index,
@@ -176,6 +184,7 @@ pub(super) fn route(
         .map(|mut segments| {
             assign_ports(&mut segments, nodes, tracks);
             assign_anchors(&mut segments, width)?;
+            align_node_ports_with_branches(&mut segments, nodes);
             plan_channel(segments, width)
         })
         .collect()
@@ -209,55 +218,29 @@ fn assign_ports(segments: &mut [Segment], nodes: &[NodeGeom], tracks: &[Track]) 
         }
     }
 
-    for (node, indices) in by_source {
-        let mut groups = endpoint_groups(indices, segments);
-        groups.sort_by_key(|group| {
-            group
-                .iter()
-                .map(|index| endpoint_x(segments[*index].to, nodes, tracks))
-                .sum::<usize>()
-                / group.len()
+    for (node, mut indices) in by_source {
+        indices.sort_by_key(|index| {
+            (
+                endpoint_x(segments[*index].to, nodes, tracks),
+                segments[*index].edge,
+            )
         });
-        for (slot, group) in groups.iter().enumerate() {
-            let port = spread_port(&nodes[node], groups.len(), slot);
-            for index in group {
-                segments[*index].sx = port;
-            }
+        for (slot, index) in indices.iter().enumerate() {
+            segments[*index].sx = spread_port(&nodes[node], indices.len(), slot);
         }
     }
 
-    for (node, indices) in by_target {
-        let mut groups = endpoint_groups(indices, segments);
-        groups.sort_by_key(|group| {
-            group
-                .iter()
-                .map(|index| endpoint_x(segments[*index].from, nodes, tracks))
-                .sum::<usize>()
-                / group.len()
+    for (node, mut indices) in by_target {
+        indices.sort_by_key(|index| {
+            (
+                endpoint_x(segments[*index].from, nodes, tracks),
+                segments[*index].edge,
+            )
         });
-        for (slot, group) in groups.iter().enumerate() {
-            let port = spread_port(&nodes[node], groups.len(), slot);
-            for index in group {
-                segments[*index].tx = port;
-            }
+        for (slot, index) in indices.iter().enumerate() {
+            segments[*index].tx = spread_port(&nodes[node], indices.len(), slot);
         }
     }
-}
-
-fn endpoint_groups(mut indices: Vec<usize>, segments: &[Segment]) -> Vec<Vec<usize>> {
-    indices.sort_by_key(|index| segments[*index].edge);
-    let mut groups: Vec<Vec<usize>> = Vec::new();
-    for index in indices {
-        if let Some(group) = groups
-            .iter_mut()
-            .find(|group| segments[group[0]].kind == segments[index].kind)
-        {
-            group.push(index);
-        } else {
-            groups.push(vec![index]);
-        }
-    }
-    groups
 }
 
 fn spread_port(node: &NodeGeom, count: usize, slot: usize) -> usize {
@@ -265,31 +248,38 @@ fn spread_port(node: &NodeGeom, count: usize, slot: usize) -> usize {
     node.x + 1 + (interior * (slot + 1)) / (count + 1)
 }
 
+fn align_node_ports_with_branches(segments: &mut [Segment], nodes: &[NodeGeom]) {
+    let mut by_source: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut by_target: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (index, segment) in segments.iter().enumerate() {
+        if let End::Node(node) = segment.from {
+            by_source.entry(node).or_default().push(index);
+        }
+        if let End::Node(node) = segment.to {
+            by_target.entry(node).or_default().push(index);
+        }
+    }
+
+    for (node, mut indices) in by_source {
+        indices.sort_by_key(|index| (segments[*index].anchor, segments[*index].edge));
+        for (slot, index) in indices.iter().enumerate() {
+            segments[*index].sx = spread_port(&nodes[node], indices.len(), slot);
+        }
+    }
+    for (node, mut indices) in by_target {
+        indices.sort_by_key(|index| (segments[*index].anchor, segments[*index].edge));
+        for (slot, index) in indices.iter().enumerate() {
+            segments[*index].tx = spread_port(&nodes[node], indices.len(), slot);
+        }
+    }
+}
+
 fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramError> {
     if segments.is_empty() {
         return Ok(());
     }
 
-    let mut source_counts: HashMap<BundleKey, usize> = HashMap::new();
-    let mut target_counts: HashMap<BundleKey, usize> = HashMap::new();
-    for segment in segments.iter() {
-        *source_counts.entry(segment.source_key()).or_default() += 1;
-        *target_counts.entry(segment.target_key()).or_default() += 1;
-    }
-
-    let preferred: Vec<usize> = segments
-        .iter()
-        .map(|segment| {
-            let source_bundle = source_counts[&segment.source_key()] > 1;
-            let target_bundle = target_counts[&segment.target_key()] > 1;
-            match (source_bundle, target_bundle) {
-                (true, false) => segment.tx,
-                (false, true) => segment.sx,
-                (true, true) => (segment.sx + segment.tx) / 2,
-                (false, false) => segment.tx,
-            }
-        })
-        .collect();
+    let preferred: Vec<usize> = segments.iter().map(|segment| segment.tx).collect();
     let mut order: Vec<usize> = (0..segments.len()).collect();
     order.sort_by_key(|index| {
         (
@@ -306,7 +296,16 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
     for pair in order.windows(2) {
         separations.push(
             if segments[pair[0]].label.is_some() || segments[pair[1]].label.is_some() {
-                CAPTION_TRACK_WIDTH
+                segments[pair[0]]
+                    .label
+                    .as_deref()
+                    .map(caption_width)
+                    .into_iter()
+                    .chain(segments[pair[1]].label.as_deref().map(caption_width))
+                    .max()
+                    .unwrap_or(MIN_CAPTION_WIDTH)
+                    + CAPTION_ATTACHMENT_SPAN
+                    + 1
             } else {
                 UNLABELED_TRACK_GAP
             },
@@ -386,79 +385,67 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
 }
 
 #[derive(Clone, Copy)]
-struct BusInterval {
-    key: BundleKey,
+struct RouteInterval {
+    segment: usize,
     lo: usize,
     hi: usize,
-    first_edge: usize,
+    edge: usize,
 }
 
-fn assign_bus_lanes(segments: &[Segment], source_side: bool) -> (HashMap<BundleKey, usize>, usize) {
-    let mut groups: HashMap<BundleKey, Vec<usize>> = HashMap::new();
+fn assign_bus_lanes(segments: &[Segment], source_side: bool) -> (HashMap<usize, usize>, usize) {
+    let mut routes = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
-        let key = if source_side {
-            segment.source_key()
-        } else {
-            segment.target_key()
-        };
-        groups.entry(key).or_default().push(index);
-    }
-
-    let mut buses = Vec::new();
-    for (key, members) in groups {
-        let endpoint = if source_side {
-            segments[members[0]].sx
-        } else {
-            segments[members[0]].tx
-        };
-        let lo = members
-            .iter()
-            .map(|index| segments[*index].anchor.min(endpoint))
-            .min()
-            .expect("bundle has members");
-        let hi = members
-            .iter()
-            .map(|index| segments[*index].anchor.max(endpoint))
-            .max()
-            .expect("bundle has members");
+        let endpoint = if source_side { segment.sx } else { segment.tx };
+        let lo = segment.anchor.min(endpoint);
+        let hi = segment.anchor.max(endpoint);
         if lo != hi {
-            buses.push(BusInterval {
-                key,
+            routes.push(RouteInterval {
+                segment: index,
                 lo,
                 hi,
-                first_edge: members
-                    .iter()
-                    .map(|index| segments[*index].edge)
-                    .min()
-                    .unwrap(),
+                edge: segment.edge,
             });
         }
     }
-    buses.sort_by_key(|bus| (bus.lo, bus.hi, bus.first_edge));
+    // Farther fan-out routes turn first so they pass outside nearer branches.
+    // Fan-in reverses that order: nearer routes land first and leave lower
+    // lanes clear for branches arriving from farther away.
+    if source_side {
+        routes.sort_by_key(|route| (std::cmp::Reverse(route.hi - route.lo), route.edge));
+    } else {
+        routes.sort_by_key(|route| (route.hi - route.lo, route.edge));
+    }
 
-    let mut lanes: Vec<Vec<BusInterval>> = Vec::new();
+    let mut lanes: Vec<Vec<RouteInterval>> = Vec::new();
     let mut assigned = HashMap::new();
-    for bus in buses {
+    for route in routes {
         let lane = (0..=lanes.len())
             .find(|lane| {
                 lanes.get(*lane).is_none_or(|occupants| {
                     occupants
                         .iter()
-                        .all(|other| bus.hi + 1 < other.lo || other.hi + 1 < bus.lo)
+                        .all(|other| route.hi + 1 < other.lo || other.hi + 1 < route.lo)
                 })
             })
-            .expect("a new bus lane is always available");
+            .expect("a new route lane is always available");
         if lane == lanes.len() {
             lanes.push(Vec::new());
         }
-        lanes[lane].push(bus);
-        assigned.insert(bus.key, lane);
+        lanes[lane].push(route);
+        assigned.insert(route.segment, lane);
     }
     (assigned, lanes.len())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptionSide {
+    Left,
+    Right,
+}
+
 struct Caption {
     segment: usize,
+    side: CaptionSide,
     lines: Vec<String>,
     row: usize,
     x: usize,
@@ -474,88 +461,137 @@ fn plan_captions(
     let mut anchors: Vec<usize> = segments.iter().map(|segment| segment.anchor).collect();
     anchors.sort_unstable();
     anchors.dedup();
-    let mut captions = Vec::new();
 
-    for (segment_index, segment) in segments.iter().enumerate() {
-        let Some(label) = &segment.label else {
-            continue;
-        };
+    let mut labeled_segments = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, segment)| {
+            segment
+                .label
+                .as_deref()
+                .map(|label| (index, segment, label))
+        })
+        .collect::<Vec<_>>();
+    labeled_segments.sort_by_key(|(_, segment, _)| (segment.anchor, segment.edge));
+
+    let mut captions = Vec::new();
+    let mut occupancy: Vec<Vec<(usize, usize)>> = Vec::new();
+
+    for (segment_index, segment, label) in labeled_segments {
         let position = anchors
             .binary_search(&segment.anchor)
             .expect("segment anchor is indexed");
         let left_boundary = if position == 0 {
             MARGIN_X
         } else {
-            (anchors[position - 1] + segment.anchor) / 2 + 1
+            anchors[position - 1] + CAPTION_ATTACHMENT_SPAN + 1
         };
         let right_boundary = if position + 1 == anchors.len() {
             width.saturating_sub(MARGIN_X + 1)
         } else {
-            (segment.anchor + anchors[position + 1]) / 2 - 1
+            anchors[position + 1].saturating_sub(CAPTION_ATTACHMENT_SPAN + 1)
         };
-        let available = right_boundary.saturating_sub(left_boundary) + 1;
-        if available < MIN_CAPTION_WIDTH {
-            return Err(DiagramError::Routing(format!(
-                "edge label `{label}` needs more branch space"
-            )));
-        }
-        let lines = wrap_words(label, available.min(MAX_CAPTION_WIDTH));
-        let block_width = lines
-            .iter()
-            .map(|line| line.chars().count())
-            .max()
-            .unwrap_or(0);
-        let x = segment.anchor.saturating_sub(block_width / 2).clamp(
-            left_boundary,
-            right_boundary.saturating_sub(block_width - 1),
-        );
-        captions.push(Caption {
-            segment: segment_index,
-            lines,
-            row: 0,
-            x,
-            width: block_width,
-            lo: x,
-            hi: x + block_width - 1,
-        });
-    }
+        let left_available = segment
+            .anchor
+            .saturating_sub(left_boundary + CAPTION_ATTACHMENT_SPAN);
+        let right_available =
+            right_boundary.saturating_sub(segment.anchor + CAPTION_ATTACHMENT_SPAN);
+        let outward_side = if segment.anchor < width / 2 {
+            CaptionSide::Left
+        } else {
+            CaptionSide::Right
+        };
 
-    captions.sort_by_key(|caption| (caption.lo, caption.hi, caption.segment));
-    let mut occupancy: Vec<Vec<(usize, usize)>> = Vec::new();
-    let mut height = 1;
-    for caption in &mut captions {
-        let mut row = 0;
-        loop {
-            let fits = (row..row + caption.lines.len()).all(|line| {
-                occupancy.get(line).is_none_or(|intervals| {
-                    intervals
-                        .iter()
-                        .all(|(lo, hi)| caption.hi + 1 < *lo || *hi + 1 < caption.lo)
-                })
-            });
-            if fits {
-                break;
-            }
-            row += 1;
-        }
-        caption.row = row;
-        while occupancy.len() < row + caption.lines.len() {
+        let mut candidates = [
+            (CaptionSide::Left, left_available),
+            (CaptionSide::Right, right_available),
+        ]
+        .into_iter()
+        .filter(|(_, available)| *available >= MIN_CAPTION_WIDTH)
+        .map(|(side, available)| {
+            let lines = wrap_words(label, available.min(MAX_CAPTION_WIDTH));
+            let block_width = lines
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0);
+            let x = match side {
+                CaptionSide::Left => segment.anchor - CAPTION_ATTACHMENT_SPAN - block_width,
+                CaptionSide::Right => segment.anchor + CAPTION_ATTACHMENT_SPAN + 1,
+            };
+            let mut caption = Caption {
+                segment: segment_index,
+                side,
+                lines,
+                row: 0,
+                x,
+                width: block_width,
+                lo: x,
+                hi: x + block_width - 1,
+            };
+            caption.row = first_open_caption_row(&caption, &occupancy);
+            let resulting_height = occupancy.len().max(caption.row + caption.lines.len());
+            let width_penalty = MAX_CAPTION_WIDTH - available.min(MAX_CAPTION_WIDTH);
+            let side_penalty = usize::from(side != outward_side);
+            (
+                (
+                    resulting_height,
+                    caption.lines.len(),
+                    width_penalty,
+                    side_penalty,
+                ),
+                caption,
+            )
+        })
+        .collect::<Vec<_>>();
+        // Prefer the side that adds the least channel height, then preserve
+        // readable line lengths. Outward placement breaks an otherwise equal tie.
+        candidates.sort_by_key(|(score, _)| *score);
+        let Some((_, caption)) = candidates.into_iter().next() else {
+            return Err(DiagramError::Routing(format!(
+                "edge label `{label}` needs more space beside its branch"
+            )));
+        };
+
+        while occupancy.len() < caption.row + caption.lines.len() {
             occupancy.push(Vec::new());
         }
-        for line in occupancy.iter_mut().skip(row).take(caption.lines.len()) {
+        for line in occupancy
+            .iter_mut()
+            .skip(caption.row)
+            .take(caption.lines.len())
+        {
             line.push((caption.lo, caption.hi));
         }
-        height = height.max(row + caption.lines.len());
+        captions.push(caption);
     }
-    Ok((captions, height))
+
+    Ok((captions, occupancy.len().max(1)))
+}
+
+fn first_open_caption_row(caption: &Caption, occupancy: &[Vec<(usize, usize)>]) -> usize {
+    let mut row = 0;
+    loop {
+        let fits = (row..row + caption.lines.len()).all(|line| {
+            occupancy.get(line).is_none_or(|intervals| {
+                intervals
+                    .iter()
+                    .all(|(lo, hi)| caption.hi + 1 < *lo || *hi + 1 < caption.lo)
+            })
+        });
+        if fits {
+            return row;
+        }
+        row += 1;
+    }
 }
 
 fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, DiagramError> {
     if segments.is_empty() {
         return Ok(ChannelPlan {
             height: 2,
+            ingresses: Vec::new(),
             strokes: Vec::new(),
-            arrows: Vec::new(),
             crossovers: Vec::new(),
             labels: Vec::new(),
         });
@@ -564,82 +600,86 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
     let (source_lanes, source_lane_count) = assign_bus_lanes(&segments, true);
     let (target_lanes, target_lane_count) = assign_bus_lanes(&segments, false);
     let (captions, caption_height) = plan_captions(&segments, width)?;
-    let caption_by_segment = captions
-        .iter()
-        .enumerate()
-        .map(|(caption, plan)| (plan.segment, caption))
-        .collect::<HashMap<_, _>>();
-    let caption_start = source_lane_count + 2;
-    let target_start = caption_start + caption_height + 2;
-    let arrow_row = target_start + target_lane_count + 1;
-    let height = arrow_row + 1;
+    const SOURCE_STEM_ROWS: usize = 1;
+    const BAND_GAP_ROWS: usize = 1;
+    const TARGET_STEM_ROWS: usize = 0;
+
+    let caption_start = SOURCE_STEM_ROWS + source_lane_count + BAND_GAP_ROWS;
+    let target_start = caption_start + caption_height + 1;
+    let final_row = target_start + target_lane_count + TARGET_STEM_ROWS;
+    let height = final_row + 1;
 
     let mut strokes = Vec::new();
     for (segment_index, segment) in segments.iter().enumerate() {
-        let source_row = source_lanes.get(&segment.source_key()).map(|lane| lane + 1);
+        let source_row = source_lanes
+            .get(&segment_index)
+            .map(|lane| SOURCE_STEM_ROWS + lane);
         let target_row = target_lanes
-            .get(&segment.target_key())
+            .get(&segment_index)
             .map(|lane| target_start + lane);
         let target_is_track = matches!(segment.to, End::Track(_));
-        let vertical_end = if target_is_track {
-            arrow_row
-        } else {
-            arrow_row - 1
-        };
+        let vertical_end = final_row;
 
-        let caption = caption_by_segment
-            .get(&segment_index)
-            .map(|caption| &captions[*caption]);
-        let caption_top = caption.map(|caption| caption_start + caption.row);
-        let caption_bottom = caption_top
-            .zip(caption)
-            .map(|(top, caption)| top + caption.lines.len().saturating_sub(1));
-
-        let mut points = vec![(segment.sx, 0)];
+        let mut source_points = vec![(segment.sx, 0)];
         if let Some(row) = source_row {
-            push_point(&mut points, (segment.sx, row));
-            push_point(&mut points, (segment.anchor, row));
+            push_point(&mut source_points, (segment.sx, row));
+            push_point(&mut source_points, (segment.anchor, row));
         } else {
             debug_assert_eq!(segment.sx, segment.anchor);
         }
-        if let Some(top) = caption_top {
-            push_point(&mut points, (segment.anchor, top - 1));
-        } else {
+        if target_is_track {
             if let Some(row) = target_row {
-                push_point(&mut points, (segment.anchor, row));
-                push_point(&mut points, (segment.tx, row));
+                push_point(&mut source_points, (segment.anchor, row));
+                push_point(&mut source_points, (segment.tx, row));
             } else {
                 debug_assert_eq!(segment.anchor, segment.tx);
             }
-            push_point(&mut points, (segment.tx, vertical_end));
-        }
-        strokes.push(LocalStroke {
-            cells: trace_polyline(&points),
-            dashed: segment.dashed(),
-            style: segment.style(),
-            edge: segment.edge,
-            source: segment.source_key(),
-            target: segment.target_key(),
-        });
-
-        if let Some(bottom) = caption_bottom {
-            let mut points = vec![(segment.anchor, bottom + 1)];
-            if let Some(row) = target_row {
-                push_point(&mut points, (segment.anchor, row));
-                push_point(&mut points, (segment.tx, row));
-            } else {
-                debug_assert_eq!(segment.anchor, segment.tx);
-            }
-            push_point(&mut points, (segment.tx, vertical_end));
+            push_point(&mut source_points, (segment.tx, vertical_end));
             strokes.push(LocalStroke {
-                cells: trace_polyline(&points),
+                cells: trace_polyline(&source_points),
                 dashed: segment.dashed(),
                 style: segment.style(),
                 edge: segment.edge,
-                source: segment.source_key(),
-                target: segment.target_key(),
+            });
+        } else {
+            push_point(&mut source_points, (segment.anchor, caption_start));
+            strokes.push(LocalStroke {
+                cells: trace_polyline(&source_points),
+                dashed: segment.dashed(),
+                style: segment.style(),
+                edge: segment.edge,
+            });
+
+            let mut target_points = vec![(segment.anchor, caption_start)];
+            if let Some(row) = target_row {
+                push_point(&mut target_points, (segment.anchor, row));
+                push_point(&mut target_points, (segment.tx, row));
+            } else {
+                debug_assert_eq!(segment.anchor, segment.tx);
+            }
+            push_point(&mut target_points, (segment.tx, vertical_end));
+            strokes.push(LocalStroke {
+                cells: trace_polyline(&target_points),
+                dashed: segment.dashed(),
+                style: segment.branch_style(),
+                edge: segment.edge,
             });
         }
+    }
+
+    for caption in &captions {
+        let segment = &segments[caption.segment];
+        let y = caption_start + caption.row + caption.lines.len() / 2;
+        let cells = match caption.side {
+            CaptionSide::Left => trace_polyline(&[(segment.anchor - 2, y), (segment.anchor, y)]),
+            CaptionSide::Right => trace_polyline(&[(segment.anchor, y), (segment.anchor + 2, y)]),
+        };
+        strokes.push(LocalStroke {
+            cells,
+            dashed: segment.dashed(),
+            style: segment.branch_style(),
+            edge: segment.edge,
+        });
     }
 
     let mut labels = Vec::new();
@@ -647,27 +687,35 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
         let y = caption_start + caption.row;
         for (line, text) in caption.lines.into_iter().enumerate() {
             let text_width = text.chars().count();
+            let x = match caption.side {
+                CaptionSide::Left => caption.x + caption.width - text_width,
+                CaptionSide::Right => caption.x,
+            };
             labels.push(LocalLabel {
-                x: caption.x + (caption.width - text_width) / 2,
+                x,
                 y: y + line,
                 text,
+                style: segments[caption.segment].label_style(),
             });
         }
     }
 
     let crossovers = find_crossovers(&strokes)?;
-    let mut emitted = HashSet::new();
-    let mut arrows = Vec::new();
+    let mut ingresses = Vec::new();
     for segment in &segments {
-        if matches!(segment.to, End::Node(_)) && emitted.insert(segment.target_key()) {
-            arrows.push((segment.tx, arrow_row));
+        if let End::Node(node) = segment.to {
+            ingresses.push(Ingress {
+                node,
+                x: segment.tx,
+                style: segment.ingress_style(),
+            });
         }
     }
 
     Ok(ChannelPlan {
         height,
+        ingresses,
         strokes,
-        arrows,
         crossovers,
         labels,
     })
@@ -745,7 +793,7 @@ fn find_crossovers(strokes: &[LocalStroke]) -> Result<Vec<(usize, usize)>, Diagr
 }
 
 fn related(a: &LocalStroke, b: &LocalStroke) -> bool {
-    a.edge == b.edge || a.source == b.source || a.target == b.target
+    a.edge == b.edge
 }
 
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
@@ -816,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_caption_interrupts_and_resumes_its_branch() {
+    fn caption_leader_attaches_to_a_continuous_branch() {
         let anchor = 40;
         let plan = plan_channel(
             vec![Segment {
@@ -831,27 +879,96 @@ mod tests {
             }],
             80,
         )
-        .expect("an inline caption should fit on a straight branch");
+        .expect("a side caption should fit beside a straight branch");
 
-        let caption_top = plan.labels.iter().map(|label| label.y).min().unwrap();
-        let caption_bottom = plan.labels.iter().map(|label| label.y).max().unwrap();
         let cells = plan
             .strokes
             .iter()
             .flat_map(|stroke| stroke.cells.iter())
             .collect::<Vec<_>>();
 
-        assert!(cells
-            .iter()
-            .any(|(x, y, mask)| { *x == anchor && *y + 1 == caption_top && *mask & (N | S) != 0 }));
-        assert!(cells.iter().any(|(x, y, mask)| {
-            *x == anchor && *y == caption_bottom + 1 && *mask & (N | S) != 0
-        }));
         for label in &plan.labels {
             let label_end = label.x + label.text.chars().count();
+            assert!(label_end <= anchor || label.x > anchor);
+            assert!(
+                anchor.saturating_sub(label_end) == CAPTION_ATTACHMENT_SPAN
+                    || label.x.saturating_sub(anchor + 1) == CAPTION_ATTACHMENT_SPAN
+            );
             assert!(cells
                 .iter()
-                .all(|(x, y, _)| *y != label.y || *x < label.x || *x >= label_end));
+                .any(|(x, y, mask)| { *x == anchor && *y == label.y && *mask & (N | S) != 0 }));
         }
+        let attachment_row = plan.labels[plan.labels.len() / 2].y;
+        assert!(cells
+            .iter()
+            .any(|(x, y, mask)| { *x == anchor && *y == attachment_row && *mask & (E | W) != 0 }));
+    }
+
+    #[test]
+    fn caption_uses_the_side_with_available_territory() {
+        let plan_at = |anchor| {
+            plan_channel(
+                vec![Segment {
+                    edge: 0,
+                    from: End::Node(0),
+                    to: End::Node(1),
+                    sx: anchor,
+                    tx: anchor,
+                    anchor,
+                    label: Some("a multiline branch caption keeps every line attached".into()),
+                    kind: EdgeKind::Sync,
+                }],
+                80,
+            )
+            .expect("the caption should use the open side of the branch")
+        };
+
+        let left_edge = plan_at(8);
+        assert!(left_edge.labels.len() > 1);
+        assert!(left_edge
+            .labels
+            .iter()
+            .all(|label| label.x == 8 + CAPTION_ATTACHMENT_SPAN + 1));
+
+        let right_edge = plan_at(72);
+        assert!(right_edge.labels.len() > 1);
+        assert!(right_edge
+            .labels
+            .iter()
+            .all(|label| { label.x + label.text.chars().count() == 72 - CAPTION_ATTACHMENT_SPAN }));
+    }
+
+    #[test]
+    fn route_lanes_order_fan_out_far_first_and_fan_in_near_first() {
+        let segments = vec![
+            Segment {
+                edge: 0,
+                from: End::Node(0),
+                to: End::Node(1),
+                sx: 40,
+                tx: 50,
+                anchor: 60,
+                label: None,
+                kind: EdgeKind::Sync,
+            },
+            Segment {
+                edge: 1,
+                from: End::Node(0),
+                to: End::Node(2),
+                sx: 42,
+                tx: 40,
+                anchor: 90,
+                label: None,
+                kind: EdgeKind::Sync,
+            },
+        ];
+
+        let (fan_out, _) = assign_bus_lanes(&segments, true);
+        let (fan_in, _) = assign_bus_lanes(&segments, false);
+
+        assert_eq!(fan_out[&1], 0);
+        assert_eq!(fan_out[&0], 1);
+        assert_eq!(fan_in[&0], 0);
+        assert_eq!(fan_in[&1], 1);
     }
 }

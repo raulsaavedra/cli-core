@@ -30,9 +30,12 @@ pub enum Style {
     LabelUncertain,
     NoteMarker,
     EdgeLine,
+    EdgeBranch,
     EdgeLineEvent,
     EdgeLabel,
-    Arrow,
+    EdgeLabelEvent,
+    Ingress,
+    IngressEvent,
     Title,
 }
 
@@ -92,13 +95,14 @@ impl Grid {
             cell.dashed && dashed
         };
         cell.ch = mask_to_char(cell.mask, cell.dashed);
-        // Event styling wins so event edges stay visible through junctions.
-        if cell.style == Style::Empty || style == Style::EdgeLineEvent {
+        // The target-owning branch stays legible where it leaves a dim route,
+        // while event relationships retain their stronger semantic color.
+        if style_priority(style) > style_priority(cell.style) {
             cell.style = style;
         }
     }
 
-    /// Write a single owned glyph (arrowheads, border corners painted as text).
+    /// Write a single owned glyph such as a border corner or target ingress.
     pub fn put(&mut self, x: usize, y: usize, ch: char, style: Style) {
         let i = self.idx(x, y);
         let cell = &mut self.cells[i];
@@ -120,23 +124,6 @@ impl Grid {
         for (i, ch) in s.chars().enumerate() {
             self.put(x + i, y, ch, style);
         }
-    }
-
-    /// An arrowhead terminating a stroke: allowed to land on a stroke cell.
-    pub fn arrow(&mut self, x: usize, y: usize, ch: char) {
-        let i = self.idx(x, y);
-        let cell = &mut self.cells[i];
-        debug_assert!(
-            cell.ch == ' ' || cell.mask != 0,
-            "arrow at ({x},{y}) collides with text {:?}",
-            cell.ch
-        );
-        *cell = Cell {
-            ch,
-            style: Style::Arrow,
-            mask: 0,
-            dashed: false,
-        };
     }
 
     /// Mark two unrelated routes crossing without connecting. Horizontal
@@ -196,10 +183,22 @@ fn style_code(style: Style) -> &'static str {
         Style::LabelUncertain => "\x1b[33;3m",
         Style::NoteMarker => "\x1b[1;36m",
         Style::EdgeLine => "\x1b[2m",
+        Style::EdgeBranch => "\x1b[36m",
         Style::EdgeLineEvent => "\x1b[33m",
-        Style::EdgeLabel => "\x1b[3m",
-        Style::Arrow => "\x1b[36m",
+        Style::EdgeLabel => "\x1b[3;36m",
+        Style::EdgeLabelEvent => "\x1b[3;33m",
+        Style::Ingress => "\x1b[1;36m",
+        Style::IngressEvent => "\x1b[1;33m",
         Style::Title => "\x1b[1;4m",
+    }
+}
+
+fn style_priority(style: Style) -> usize {
+    match style {
+        Style::EdgeLineEvent => 3,
+        Style::EdgeBranch => 2,
+        Style::EdgeLine => 1,
+        _ => 0,
     }
 }
 
@@ -219,10 +218,10 @@ fn mask_to_char(mask: u8, dashed: bool) -> char {
                 '─'
             }
         }
-        m if m == (N | E) => '└',
-        m if m == (N | W) => '┘',
-        m if m == (S | E) => '┌',
-        m if m == (S | W) => '┐',
+        m if m == (N | E) => '╰',
+        m if m == (N | W) => '╯',
+        m if m == (S | E) => '╭',
+        m if m == (S | W) => '╮',
         m if m == (N | E | S) => '├',
         m if m == (N | S | W) => '┤',
         m if m == (E | S | W) => '┬',

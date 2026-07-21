@@ -44,26 +44,27 @@ the `[n]` marker on a node ties it to its footnote.
 The document describes relationships; the renderer owns their geometry:
 
 - Ranks establish vertical stages. Nodes within a rank keep their declared
-  left-to-right order and form a compact block aligned toward connected ranks.
-- Each node owns a horizontal territory for its box and nearby relationship
-  captions. Available viewport width increases separation between peer branches
-  until those territories read clearly; remaining width becomes outer margin.
-- Same-kind relationships that share a source use one split trunk and bus.
-  Same-kind relationships that share a target use one merge bus and trunk.
-- A relationship label occupies the final branch entering its target. The
-  branch ends above the wrapped italic caption and resumes below it before the
-  target-side merge bus.
-- A relationship that skips authored ranks follows the nearest clear interior
-  track through those rank bands. The track stays close to its source and target
-  branch.
-- Fixed node order can make some routes cross. A `╪` marks two independent
-  routes passing over one another; junction glyphs are reserved for shared
-  endpoint bundles.
+  left-to-right order, and complete rank groups align toward connected stages.
+- Each caption is measured and wrapped before placement. Nodes and channels
+  reserve the territory required by the text they actually render.
+- Every authored relationship owns its source port, route, target port, and
+  target ingress. Routes may cross, but they never merge into shared geometry.
+- The final branch and its caption share an accent from the caption leader through
+  the ingress embedded in the target box border. Multiple incoming relationships
+  receive separate ingress ports.
+- A relationship that skips authored ranks follows the nearest clear corridor
+  around each intervening rank. Corridor selection avoids existing long routes
+  before minimizing travel distance.
+- The completed graph is centered from its rendered boxes, routes, and captions.
+  Available viewport width improves peer separation without stretching the graph
+  beyond readable branch spacing.
+- Fixed node order can make routes cross. A `╪` marks two independent routes
+  passing over one another; ordinary corners and tees belong to one relationship.
 - Notes render below the graph as numbered, hanging-indent paragraphs at a
   readable caption width. Their prose does not widen the graph.
 
 Use `hints.ranks` when the vertical grouping or left-to-right order carries
-meaning. Horizontal coordinates, ports, buses, and labels remain automatic.
+meaning. Horizontal coordinates, ports, corridors, and labels remain automatic.
 
 ## Schema
 
@@ -94,7 +95,9 @@ meaning. Horizontal coordinates, ports, buses, and labels remain automatic.
 - `queue` — single border, yellow. Topics, queues, streams.
 - `external` — dim box. Entry points, browsers, third parties, terminal sinks.
 - `decision` — renders `< label >`, yellow. A branch point.
-- edge `sync` solid; `async` dashed; `event` dashed accent (yellow).
+- edge `sync` solid; `async` dashed; `event` dashed accent (yellow). Relationship
+  captions and their final branches use subdued cyan; target ingresses use a
+  brighter accent inside the box border.
 - note `info` is a dim footnote; `uncertain` is yellow and flagged with `?`, for open questions.
 
 ## Rules that bite

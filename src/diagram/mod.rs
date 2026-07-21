@@ -98,9 +98,9 @@ mod tests {
         haystack.match_indices(needle).count()
     }
 
-    fn dual_bundle_src() -> &'static str {
+    fn dense_relationships_src() -> &'static str {
         r#"{
-          "title": "dual bundle routing",
+          "title": "dense relationship routing",
           "nodes": [
             {"id": "client", "label": "Client", "kind": "external"},
             {"id": "operator", "label": "Operator", "kind": "external"},
@@ -132,9 +132,9 @@ mod tests {
         }"#
     }
 
-    fn descriptive_bundles_src() -> &'static str {
+    fn descriptive_relationships_src() -> &'static str {
         r#"{
-          "title": "descriptive bundled edges",
+          "title": "descriptive relationships",
           "nodes": [
             {"id": "source", "label": "Source", "kind": "external"},
             {"id": "left", "label": "Adapter A"},
@@ -185,6 +185,15 @@ mod tests {
         }
     }
 
+    fn node_top_border<'a>(text: &'a str, label: &str) -> &'a str {
+        let lines = text.lines().collect::<Vec<_>>();
+        let content = lines
+            .iter()
+            .position(|line| line.contains(label) && (line.contains('│') || line.contains('║')))
+            .expect("node content line is rendered");
+        lines[content - 1]
+    }
+
     #[test]
     fn simple_chain() {
         let text = render_plain(
@@ -204,7 +213,9 @@ mod tests {
         assert_eq!(count(&text, "Lambda"), 1);
         assert_eq!(count(&text, "DynamoDB"), 1);
         assert_eq!(count(&text, "invoke"), 1);
-        assert_eq!(count(&text, "▼"), 2, "one arrowhead per edge");
+        assert_eq!(count(&text, "▼"), 2, "one ingress per edge");
+        assert_eq!(count(node_top_border(&text, "Lambda"), "▼"), 1);
+        assert_eq!(count(node_top_border(&text, "DynamoDB"), "▼"), 1);
         assert!(text.contains("╔"), "store renders with a double border");
     }
 
@@ -254,15 +265,16 @@ mod tests {
         );
         assert_eq!(
             count(&text, "▼"),
-            1,
-            "fan-in branches share one target trunk and arrowhead"
+            3,
+            "every authored relationship keeps its own target ingress"
         );
+        assert_eq!(count(node_top_border(&text, "events"), "▼"), 3);
     }
 
     #[test]
-    fn dual_bundles_render_every_relationship_caption() {
-        let rendered = render_json_in(dual_bundle_src(), 120)
-            .expect("dual source and target bundles should route without false junctions");
+    fn dense_routes_render_every_relationship_caption() {
+        let rendered = render_json_in(dense_relationships_src(), 120)
+            .expect("dense source and target routes should keep their identities");
         let lines: Vec<String> = rendered.lines.iter().map(|line| strip_ansi(line)).collect();
         let text = normalized_text(&lines);
 
@@ -283,7 +295,7 @@ mod tests {
 
     #[test]
     fn descriptive_branches_render_wrapped_captions() {
-        let rendered = render_json_in(descriptive_bundles_src(), 120)
+        let rendered = render_json_in(descriptive_relationships_src(), 120)
             .expect("descriptive branch labels should participate in layout");
         let lines = rendered
             .lines
@@ -327,7 +339,7 @@ mod tests {
         assert_eq!(
             count(&text, "▼"),
             3,
-            "long edge still lands exactly one arrow"
+            "long edge still lands exactly one ingress"
         );
         assert!(text.contains("┆"), "async edge renders dashed");
         let lines = text.lines().collect::<Vec<_>>();
@@ -360,14 +372,9 @@ mod tests {
         // Annotated nodes carry a marker keyed to the footnote list.
         assert!(text.contains("SNS topic [1]"), "node shows its marker");
         assert!(text.contains("Worker [2]"));
-        // Notes live below the diagram as footnotes, not inline boxes.
+        // Notes live below the diagram as footnotes.
         assert!(text.contains("[1] SNS topic — ? fan-out consumer TBD"));
         assert!(text.contains("[2] Worker — idempotent"));
-        // No rounded note boxes in the graph any more.
-        assert!(
-            !text.contains("╭"),
-            "notes no longer render as inline boxes"
-        );
     }
 
     #[test]
@@ -388,9 +395,9 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        // A reaches C through a clear interior track across B's rank. Both
-        // relationships converge on one target port and share its arrowhead.
-        assert_eq!(count(&text, "▼"), 1);
+        // A reaches C through a clear rank corridor across B's rank. Each
+        // authored relationship keeps its own target ingress.
+        assert_eq!(count(&text, "▼"), 2);
     }
 
     #[test]
@@ -431,8 +438,8 @@ mod tests {
         }
         assert_eq!(
             count(&text, "▼"),
-            7,
-            "the two server-global inputs share one fan-in arrowhead"
+            8,
+            "every authored relationship keeps its own ingress"
         );
     }
 
