@@ -276,6 +276,7 @@ mod tests {
         let rendered = render_json_in(dense_relationships_src(), 120)
             .expect("dense source and target routes should keep their identities");
         let lines: Vec<String> = rendered.lines.iter().map(|line| strip_ansi(line)).collect();
+        let plain = lines.join("\n");
         let text = normalized_text(&lines);
 
         for label in [
@@ -291,6 +292,11 @@ mod tests {
             assert_words_rendered(&text, label);
         }
         assert!(text.contains('┄') || text.contains('┆'));
+        assert_eq!(
+            count(&plain, "╪"),
+            1,
+            "fixed rank order requires one explicit crossover"
+        );
     }
 
     #[test]
@@ -349,9 +355,55 @@ mod tests {
             .position(|line| line.contains("raw copy"))
             .unwrap();
         assert!(
-            caption > middle_rank,
-            "a long relationship label belongs to its destination channel"
+            caption < middle_rank,
+            "a long relationship caption uses the clearest route segment"
         );
+    }
+
+    #[test]
+    fn parallel_long_relationships_choose_planar_caption_segments() {
+        let rendered = render_json_in(
+            r#"{
+              "nodes": [
+                {"id": "client", "label": "Client", "kind": "external"},
+                {"id": "gateway", "label": "Gateway"},
+                {"id": "account", "label": "Account Service"},
+                {"id": "identity", "label": "Identity Provider"},
+                {"id": "business", "label": "Business Service"},
+                {"id": "roles", "label": "Role Store", "kind": "store"}
+              ],
+              "edges": [
+                {"from": "client", "to": "gateway", "label": "account requests"},
+                {"from": "client", "to": "business", "label": "direct business requests"},
+                {"from": "gateway", "to": "account", "label": "account operations"},
+                {"from": "gateway", "to": "business", "label": "business operations"},
+                {"from": "account", "to": "identity", "label": "identity sessions"},
+                {"from": "account", "to": "roles", "label": "role projection"},
+                {"from": "business", "to": "roles", "label": "role changes"}
+              ],
+              "hints": {
+                "ranks": [
+                  ["client"],
+                  ["gateway"],
+                  ["account"],
+                  ["identity", "business"],
+                  ["roles"]
+                ]
+              }
+            }"#,
+            160,
+        )
+        .expect("parallel long relationships should select planar caption segments");
+        let plain = rendered
+            .lines
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(count(&plain, "direct business requests"), 1);
+        assert_eq!(count(&plain, "business operations"), 1);
+        assert_eq!(count(&plain, "╪"), 0);
     }
 
     #[test]
@@ -395,8 +447,8 @@ mod tests {
             .map(|l| strip_ansi(l))
             .collect::<Vec<_>>()
             .join("\n");
-        // A reaches C through a clear rank corridor across B's rank. Each
-        // authored relationship keeps its own target ingress.
+        // A reaches C through a virtual waypoint in B's rank. Each authored
+        // relationship keeps its own target ingress.
         assert_eq!(count(&text, "▼"), 2);
     }
 
@@ -441,6 +493,7 @@ mod tests {
             8,
             "every authored relationship keeps its own ingress"
         );
+        assert!(!text.contains('╪'), "long relationships stay planar");
     }
 
     #[test]

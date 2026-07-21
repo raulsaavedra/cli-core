@@ -44,17 +44,24 @@ the `[n]` marker on a node ties it to its footnote.
 The document describes relationships; the renderer owns their geometry:
 
 - Ranks establish vertical stages. Nodes within a rank keep their declared
-  left-to-right order, and complete rank groups align toward connected stages.
-- Each caption is measured and wrapped before placement. Nodes and channels
-  reserve the territory required by the text they actually render.
+  left-to-right order. Relationships that cross intermediate ranks contribute
+  virtual waypoints to those ranks before horizontal placement begins.
+- Directional crossing-reduction sweeps place virtual waypoints around the fixed
+  node order. Direct node relationships receive stronger alignment than long
+  relationship segments, keeping local flows straight while bypass routes peel
+  into their own territory.
+- Each caption is measured and wrapped before placement. The renderer evaluates
+  every segment of a relationship and attaches the caption where its text has
+  the clearest territory and preserves the cleanest route geometry. A long
+  relationship reserves that territory through its virtual waypoints.
 - Every authored relationship owns its source port, route, target port, and
   target ingress. Routes may cross, but they never merge into shared geometry.
-- The final branch and its caption share an accent from the caption leader through
-  the ingress embedded in the target box border. Multiple incoming relationships
-  receive separate ingress ports.
-- A relationship that skips authored ranks follows the nearest clear corridor
-  around each intervening rank. Corridor selection avoids existing long routes
-  before minimizing travel distance.
+- A relationship's accent begins at its caption attachment and continues through
+  every remaining segment to the ingress embedded in the target box border.
+  Multiple incoming relationships receive separate ingress ports.
+- Horizontal bends are ordered by route dependencies. A relationship turns only
+  after every vertical stem it would cross has moved away, producing planar
+  outside-in fan-out and fan-in whenever the authored node order permits it.
 - The completed graph is centered from its rendered boxes, routes, and captions.
   Available viewport width improves peer separation without stretching the graph
   beyond readable branch spacing.
@@ -64,7 +71,8 @@ The document describes relationships; the renderer owns their geometry:
   readable caption width. Their prose does not widen the graph.
 
 Use `hints.ranks` when the vertical grouping or left-to-right order carries
-meaning. Horizontal coordinates, ports, corridors, and labels remain automatic.
+meaning. Horizontal coordinates, virtual waypoints, ports, and labels remain
+automatic.
 
 ## Schema
 
@@ -96,8 +104,8 @@ meaning. Horizontal coordinates, ports, corridors, and labels remain automatic.
 - `external` — dim box. Entry points, browsers, third parties, terminal sinks.
 - `decision` — renders `< label >`, yellow. A branch point.
 - edge `sync` solid; `async` dashed; `event` dashed accent (yellow). Relationship
-  captions and their final branches use subdued cyan; target ingresses use a
-  brighter accent inside the box border.
+  captions and the route from each caption to its target use subdued cyan;
+  target ingresses use a brighter accent inside the box border.
 - note `info` is a dim footnote; `uncertain` is yellow and flagged with `?`, for open questions.
 
 ## Rules that bite

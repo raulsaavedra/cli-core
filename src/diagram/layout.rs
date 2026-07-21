@@ -2,9 +2,11 @@
 //!
 //! Authored ranks establish vertical stages. Horizontal placement follows the
 //! graph's branch structure, and every authored relationship keeps its own ports,
-//! route, and target ingress. The final branch carries its caption into a port
-//! embedded in the target box, while long relationships clear only the ranks
-//! they cross. Final composition balances the complete routed graph.
+//! route, and target ingress. A relationship caption attaches to the clearest
+//! segment of that route, and its accent continues from the attachment through
+//! the target ingress. Long relationships participate in every rank through
+//! virtual waypoints, so placement and routing share one graph model. Final
+//! composition balances the complete routed graph.
 
 mod placement;
 mod routing;
@@ -89,26 +91,14 @@ impl NodeGeom {
     pub fn center(&self) -> usize {
         self.x + self.w / 2
     }
-
-    #[cfg(test)]
-    fn test_at(x: usize, w: usize) -> Self {
-        Self {
-            x,
-            w,
-            content: "test".into(),
-            border: BorderKind::Solid,
-            border_style: Style::Border,
-            content_style: Style::Label,
-        }
-    }
 }
 
 pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
     let mut nodes = build_node_geometry(model);
     reserve_node_ports(model, &mut nodes);
 
-    let placement = placement::place(model, &mut nodes, viewport)?;
-    let channels = routing::route(model, &nodes, &placement.tracks, placement.width)?;
+    let mut placement = placement::place(model, &mut nodes, viewport)?;
+    let channels = routing::route(model, &nodes, &mut placement.virtuals, placement.width)?;
     let mut ingresses_by_node: HashMap<usize, Vec<IngressPort>> = HashMap::new();
     for channel in &channels {
         for ingress in &channel.ingresses {
@@ -163,24 +153,23 @@ pub fn compute(model: &Model, viewport: usize) -> Result<Scene, DiagramError> {
         }
     }
 
-    // A long relationship enters its track below the source, passes through
-    // clear space in each intervening rank, and leaves above the target.
-    for track in &placement.tracks {
-        let edge = &model.edges[track.edge];
-        let (dashed, style) = edge_style(edge.kind);
-        for rank_top in rank_y
-            .iter()
-            .take(track.target_rank)
-            .skip(track.source_rank + 1)
-        {
-            ops.push(Op::Stroke {
-                cells: (*rank_top..*rank_top + RANK_H)
-                    .map(|y| (track.x, y, N | S))
-                    .collect(),
-                dashed,
-                style,
-            });
-        }
+    // Virtual waypoints carry a long relationship through intermediate ranks.
+    // The adjacent channels above and below share this exact column.
+    for virtual_node in &placement.virtuals {
+        let edge = &model.edges[virtual_node.edge];
+        let (dashed, style) = if virtual_node.accented {
+            edge_branch_style(edge.kind)
+        } else {
+            edge_style(edge.kind)
+        };
+        let rank_top = rank_y[virtual_node.rank];
+        ops.push(Op::Stroke {
+            cells: (rank_top..rank_top + RANK_H)
+                .map(|y| (virtual_node.x, y, N | S))
+                .collect(),
+            dashed,
+            style,
+        });
     }
 
     for (channel, top) in channels.into_iter().zip(channel_y) {
@@ -376,6 +365,17 @@ fn edge_style(kind: EdgeKind) -> (bool, Style) {
             Style::EdgeLineEvent
         } else {
             Style::EdgeLine
+        },
+    )
+}
+
+fn edge_branch_style(kind: EdgeKind) -> (bool, Style) {
+    (
+        matches!(kind, EdgeKind::Async | EdgeKind::Event),
+        if kind == EdgeKind::Event {
+            Style::EdgeLineEvent
+        } else {
+            Style::EdgeBranch
         },
     )
 }

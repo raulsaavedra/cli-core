@@ -151,7 +151,6 @@ impl std::error::Error for DiagramError {}
 
 #[derive(Debug)]
 pub struct ModelNode {
-    pub id: String,
     pub label: String,
     pub kind: NodeKind,
     pub rank: usize,
@@ -282,7 +281,6 @@ pub fn resolve(doc: Doc) -> Result<Model, DiagramError> {
         .into_iter()
         .enumerate()
         .map(|(i, n)| ModelNode {
-            id: n.id,
             label: n.label,
             kind: n.kind,
             rank: final_rank[i],

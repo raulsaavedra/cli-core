@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::placement::Track;
+use super::placement::VirtualGeom;
 use super::{
     caption_width, NodeGeom, Op, CAPTION_ATTACHMENT_SPAN, MARGIN_X, MAX_CAPTION_WIDTH,
     MIN_CAPTION_WIDTH,
@@ -19,9 +19,10 @@ const UNLABELED_TRACK_GAP: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum End {
     Node(usize),
-    Track(usize),
+    Virtual(usize),
 }
 
+#[derive(Clone)]
 struct Segment {
     edge: usize,
     from: End,
@@ -30,6 +31,7 @@ struct Segment {
     tx: usize,
     anchor: usize,
     label: Option<String>,
+    accented: bool,
     kind: EdgeKind,
 }
 
@@ -51,6 +53,14 @@ impl Segment {
             Style::EdgeLineEvent
         } else {
             Style::EdgeBranch
+        }
+    }
+
+    fn route_style(&self) -> Style {
+        if self.accented {
+            self.branch_style()
+        } else {
+            self.style()
         }
     }
 
@@ -131,21 +141,20 @@ impl ChannelPlan {
 pub(super) fn route(
     model: &Model,
     nodes: &[NodeGeom],
-    tracks: &[Track],
+    virtuals: &mut [VirtualGeom],
     width: usize,
 ) -> Result<Vec<ChannelPlan>, DiagramError> {
     let channel_count = model.ranks.len().saturating_sub(1);
     let mut channels: Vec<Vec<Segment>> = (0..channel_count).map(|_| Vec::new()).collect();
-    let track_by_edge: HashMap<usize, usize> = tracks
+    let virtual_by_edge_rank: HashMap<(usize, usize), usize> = virtuals
         .iter()
         .enumerate()
-        .map(|(index, track)| (track.edge, index))
+        .map(|(index, virtual_node)| ((virtual_node.edge, virtual_node.rank), index))
         .collect();
 
     for (edge_index, edge) in model.edges.iter().enumerate() {
         let source_rank = model.nodes[edge.from].rank;
         let target_rank = model.nodes[edge.to].rank;
-        let track = track_by_edge.get(&edge_index).copied();
         for (channel, segments) in channels
             .iter_mut()
             .enumerate()
@@ -155,12 +164,12 @@ pub(super) fn route(
             let from = if channel == source_rank {
                 End::Node(edge.from)
             } else {
-                End::Track(track.expect("long edge has a rank corridor"))
+                End::Virtual(virtual_by_edge_rank[&(edge_index, channel)])
             };
             let to = if channel + 1 == target_rank {
                 End::Node(edge.to)
             } else {
-                End::Track(track.expect("long edge has a rank corridor"))
+                End::Virtual(virtual_by_edge_rank[&(edge_index, channel + 1)])
             };
             segments.push(Segment {
                 edge: edge_index,
@@ -169,35 +178,150 @@ pub(super) fn route(
                 sx: 0,
                 tx: 0,
                 anchor: 0,
-                label: if channel + 1 == target_rank {
-                    edge.label.clone()
-                } else {
-                    None
-                },
+                label: None,
+                accented: false,
                 kind: edge.kind,
             });
         }
     }
 
+    for segments in &mut channels {
+        assign_ports(segments, nodes, virtuals);
+        assign_anchors(segments, width)?;
+        align_node_ports_with_branches(segments, nodes);
+    }
+    place_relationship_captions(model, &mut channels, nodes, virtuals, width)?;
+    for segment in channels.iter().flatten() {
+        if segment.label.is_some() || segment.accented {
+            if let End::Virtual(virtual_node) = segment.to {
+                virtuals[virtual_node].accented = true;
+            }
+        }
+    }
+    for segments in &mut channels {
+        assign_ports(segments, nodes, virtuals);
+        assign_anchors(segments, width)?;
+        align_node_ports_with_branches(segments, nodes);
+    }
+
     channels
         .into_iter()
-        .map(|mut segments| {
-            assign_ports(&mut segments, nodes, tracks);
-            assign_anchors(&mut segments, width)?;
-            align_node_ports_with_branches(&mut segments, nodes);
-            plan_channel(segments, width)
-        })
+        .map(|segments| plan_channel(segments, width))
         .collect()
 }
 
-fn endpoint_x(end: End, nodes: &[NodeGeom], tracks: &[Track]) -> usize {
+fn place_relationship_captions(
+    model: &Model,
+    channels: &mut [Vec<Segment>],
+    nodes: &[NodeGeom],
+    virtuals: &[VirtualGeom],
+    width: usize,
+) -> Result<(), DiagramError> {
+    // A caption belongs to the complete relationship. Every segment competes
+    // to host it using the geometry that the full routed graph would produce.
+    for (edge_index, edge) in model.edges.iter().enumerate() {
+        let Some(label) = edge.label.as_deref() else {
+            continue;
+        };
+        let required = caption_width(label);
+        let source_rank = model.nodes[edge.from].rank;
+        let mut candidates = Vec::new();
+        for (channel, segments) in channels.iter().enumerate() {
+            let Some((segment_index, segment)) = segments
+                .iter()
+                .enumerate()
+                .find(|(_, segment)| segment.edge == edge_index)
+            else {
+                continue;
+            };
+            let mut anchors = segments
+                .iter()
+                .map(|segment| segment.anchor)
+                .collect::<Vec<_>>();
+            anchors.sort_unstable();
+            anchors.dedup();
+            let (left, right) = caption_availability(segment.anchor, &anchors, width);
+            let available = left.max(right).min(MAX_CAPTION_WIDTH);
+            let deficit = required.saturating_sub(available);
+            let lines = wrap_words(label, available.max(1)).len();
+            let crossings = caption_candidate_crossings(
+                channels,
+                channel,
+                segment_index,
+                label,
+                nodes,
+                virtuals,
+                width,
+            );
+            candidates.push((
+                (
+                    crossings,
+                    deficit,
+                    lines,
+                    segments.len(),
+                    channel.saturating_sub(source_rank),
+                    std::cmp::Reverse(available),
+                ),
+                channel,
+                segment_index,
+            ));
+        }
+        candidates.sort_by_key(|(score, _, _)| *score);
+        let Some((_, host_channel, host_segment)) = candidates.into_iter().next() else {
+            return Err(DiagramError::Routing(format!(
+                "relationship caption `{label}` has no route segment"
+            )));
+        };
+        channels[host_channel][host_segment].label = Some(label.to_string());
+        for segments in channels.iter_mut().skip(host_channel + 1) {
+            if let Some(segment) = segments
+                .iter_mut()
+                .find(|segment| segment.edge == edge_index)
+            {
+                segment.accented = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn caption_candidate_crossings(
+    channels: &[Vec<Segment>],
+    host_channel: usize,
+    host_segment: usize,
+    label: &str,
+    nodes: &[NodeGeom],
+    virtuals: &[VirtualGeom],
+    width: usize,
+) -> usize {
+    // Caption width changes branch spacing and can alter routes in neighboring
+    // channels, so score the complete candidate layout rather than one channel.
+    let mut candidate = channels.to_vec();
+    candidate[host_channel][host_segment].label = Some(label.to_string());
+
+    let mut crossings = 0;
+    for segments in &mut candidate {
+        assign_ports(segments, nodes, virtuals);
+        if assign_anchors(segments, width).is_err() {
+            return usize::MAX;
+        }
+        align_node_ports_with_branches(segments, nodes);
+        match plan_channel(segments.clone(), width) {
+            Ok(channel) => crossings += channel.crossovers.len(),
+            Err(_) => return usize::MAX,
+        }
+    }
+    crossings
+}
+
+fn endpoint_x(end: End, nodes: &[NodeGeom], virtuals: &[VirtualGeom]) -> usize {
     match end {
         End::Node(node) => nodes[node].center(),
-        End::Track(track) => tracks[track].x,
+        End::Virtual(virtual_node) => virtuals[virtual_node].x,
     }
 }
 
-fn assign_ports(segments: &mut [Segment], nodes: &[NodeGeom], tracks: &[Track]) {
+fn assign_ports(segments: &mut [Segment], nodes: &[NodeGeom], virtuals: &[VirtualGeom]) {
     let mut by_source: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut by_target: HashMap<usize, Vec<usize>> = HashMap::new();
     for (index, segment) in segments.iter().enumerate() {
@@ -210,18 +334,18 @@ fn assign_ports(segments: &mut [Segment], nodes: &[NodeGeom], tracks: &[Track]) 
     }
 
     for segment in segments.iter_mut() {
-        if let End::Track(track) = segment.from {
-            segment.sx = tracks[track].x;
+        if let End::Virtual(virtual_node) = segment.from {
+            segment.sx = virtuals[virtual_node].x;
         }
-        if let End::Track(track) = segment.to {
-            segment.tx = tracks[track].x;
+        if let End::Virtual(virtual_node) = segment.to {
+            segment.tx = virtuals[virtual_node].x;
         }
     }
 
     for (node, mut indices) in by_source {
         indices.sort_by_key(|index| {
             (
-                endpoint_x(segments[*index].to, nodes, tracks),
+                endpoint_x(segments[*index].to, nodes, virtuals),
                 segments[*index].edge,
             )
         });
@@ -233,7 +357,7 @@ fn assign_ports(segments: &mut [Segment], nodes: &[NodeGeom], tracks: &[Track]) 
     for (node, mut indices) in by_target {
         indices.sort_by_key(|index| {
             (
-                endpoint_x(segments[*index].from, nodes, tracks),
+                endpoint_x(segments[*index].from, nodes, virtuals),
                 segments[*index].edge,
             )
         });
@@ -290,8 +414,14 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
         )
     });
 
-    let left = MARGIN_X + 1;
-    let right = width.saturating_sub(MARGIN_X + 2);
+    let outer_caption_room = segments
+        .iter()
+        .filter_map(|segment| segment.label.as_deref().map(caption_width))
+        .max()
+        .map(|caption| caption + CAPTION_ATTACHMENT_SPAN)
+        .unwrap_or(0);
+    let left = MARGIN_X + 1 + outer_caption_room;
+    let right = width.saturating_sub(MARGIN_X + 2 + outer_caption_room);
     let mut separations = Vec::new();
     for pair in order.windows(2) {
         separations.push(
@@ -304,7 +434,7 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
                     .chain(segments[pair[1]].label.as_deref().map(caption_width))
                     .max()
                     .unwrap_or(MIN_CAPTION_WIDTH)
-                    + CAPTION_ATTACHMENT_SPAN
+                    + 2 * CAPTION_ATTACHMENT_SPAN
                     + 1
             } else {
                 UNLABELED_TRACK_GAP
@@ -312,38 +442,18 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
         );
     }
 
-    // Track-to-track segments cross an intermediate rank and keep the physical
-    // column selected by placement. Neighboring branches move around that fixed
-    // column while preserving their topology order.
-    let fixed: Vec<Option<usize>> = order
-        .iter()
-        .map(|index| match (segments[*index].from, segments[*index].to) {
-            (End::Track(from), End::Track(to)) if from == to => Some(segments[*index].sx),
-            _ => None,
-        })
-        .collect();
-
     let mut lower = vec![left; order.len()];
     for position in 0..order.len() {
-        let minimum = if position == 0 {
+        lower[position] = if position == 0 {
             left
         } else {
             lower[position - 1] + separations[position - 1]
-        };
-        lower[position] = match fixed[position] {
-            Some(column) if column < minimum => {
-                return Err(DiagramError::Routing(
-                    "fixed relationship tracks need a wider branch field".into(),
-                ));
-            }
-            Some(column) => column,
-            None => minimum,
         };
     }
 
     let mut upper = vec![right; order.len()];
     for position in (0..order.len()).rev() {
-        let maximum = if position + 1 == order.len() {
+        upper[position] = if position + 1 == order.len() {
             right
         } else {
             upper[position + 1]
@@ -351,15 +461,6 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
                 .ok_or_else(|| {
                     DiagramError::Routing("relationship captions need a wider branch field".into())
                 })?
-        };
-        upper[position] = match fixed[position] {
-            Some(column) if column > maximum => {
-                return Err(DiagramError::Routing(
-                    "fixed relationship tracks need a wider branch field".into(),
-                ));
-            }
-            Some(column) => column,
-            None => maximum,
         };
         if lower[position] > upper[position] {
             return Err(DiagramError::Routing(
@@ -375,8 +476,7 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
         } else {
             (positions[position - 1] + separations[position - 1]).max(lower[position])
         };
-        positions[position] = fixed[position]
-            .unwrap_or_else(|| preferred[order[position]].clamp(minimum, upper[position]));
+        positions[position] = preferred[order[position]].clamp(minimum, upper[position]);
     }
     for (position, segment) in order.into_iter().enumerate() {
         segments[segment].anchor = positions[position];
@@ -387,39 +487,81 @@ fn assign_anchors(segments: &mut [Segment], width: usize) -> Result<(), DiagramE
 #[derive(Clone, Copy)]
 struct RouteInterval {
     segment: usize,
+    start: usize,
     lo: usize,
     hi: usize,
     edge: usize,
 }
 
-fn assign_bus_lanes(segments: &[Segment], source_side: bool) -> (HashMap<usize, usize>, usize) {
+fn assign_bus_lanes(
+    segments: &[Segment],
+    source_side: bool,
+) -> Result<(HashMap<usize, usize>, usize), DiagramError> {
     let mut routes = Vec::new();
     for (index, segment) in segments.iter().enumerate() {
-        let endpoint = if source_side { segment.sx } else { segment.tx };
-        let lo = segment.anchor.min(endpoint);
-        let hi = segment.anchor.max(endpoint);
+        let (start, end) = if source_side {
+            (segment.sx, segment.anchor)
+        } else {
+            (segment.anchor, segment.tx)
+        };
+        let lo = start.min(end);
+        let hi = start.max(end);
         if lo != hi {
             routes.push(RouteInterval {
                 segment: index,
+                start,
                 lo,
                 hi,
                 edge: segment.edge,
             });
         }
     }
-    // Farther fan-out routes turn first so they pass outside nearer branches.
-    // Fan-in reverses that order: nearer routes land first and leave lower
-    // lanes clear for branches arriving from farther away.
-    if source_side {
-        routes.sort_by_key(|route| (std::cmp::Reverse(route.hi - route.lo), route.edge));
-    } else {
-        routes.sort_by_key(|route| (route.hi - route.lo, route.edge));
+
+    // A horizontal turn must happen after every vertical stem it crosses has
+    // already turned away. These dependencies produce planar outside-in bends
+    // for both fan-out and fan-in, independent of route length or direction.
+    let mut predecessors: HashMap<usize, HashSet<usize>> = HashMap::new();
+    for route in &routes {
+        for other in &routes {
+            if route.segment != other.segment && route.lo < other.start && other.start < route.hi {
+                predecessors
+                    .entry(route.segment)
+                    .or_default()
+                    .insert(other.segment);
+            }
+        }
     }
 
     let mut lanes: Vec<Vec<RouteInterval>> = Vec::new();
     let mut assigned = HashMap::new();
-    for route in routes {
-        let lane = (0..=lanes.len())
+    let mut pending = routes;
+    while !pending.is_empty() {
+        let Some(next) = pending
+            .iter()
+            .enumerate()
+            .filter(|(_, route)| {
+                predecessors.get(&route.segment).is_none_or(|required| {
+                    required
+                        .iter()
+                        .all(|segment| assigned.contains_key(segment))
+                })
+            })
+            .min_by_key(|(_, route)| (route.start, route.hi, route.edge))
+            .map(|(index, _)| index)
+        else {
+            return Err(DiagramError::Routing(
+                "relationship order crosses inside a rank channel".into(),
+            ));
+        };
+        let route = pending.remove(next);
+        let first_lane = predecessors
+            .get(&route.segment)
+            .into_iter()
+            .flatten()
+            .map(|segment| assigned[segment] + 1)
+            .max()
+            .unwrap_or(0);
+        let lane = (first_lane..=lanes.len())
             .find(|lane| {
                 lanes.get(*lane).is_none_or(|occupants| {
                     occupants
@@ -434,7 +576,7 @@ fn assign_bus_lanes(segments: &[Segment], source_side: bool) -> (HashMap<usize, 
         lanes[lane].push(route);
         assigned.insert(route.segment, lane);
     }
-    (assigned, lanes.len())
+    Ok((assigned, lanes.len()))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -452,6 +594,26 @@ struct Caption {
     width: usize,
     lo: usize,
     hi: usize,
+}
+
+fn caption_availability(anchor: usize, anchors: &[usize], width: usize) -> (usize, usize) {
+    let position = anchors
+        .binary_search(&anchor)
+        .expect("segment anchor is indexed");
+    let left_boundary = if position == 0 {
+        MARGIN_X
+    } else {
+        anchors[position - 1] + CAPTION_ATTACHMENT_SPAN + 1
+    };
+    let right_boundary = if position + 1 == anchors.len() {
+        width.saturating_sub(MARGIN_X + 1)
+    } else {
+        anchors[position + 1].saturating_sub(CAPTION_ATTACHMENT_SPAN + 1)
+    };
+    (
+        anchor.saturating_sub(left_boundary + CAPTION_ATTACHMENT_SPAN),
+        right_boundary.saturating_sub(anchor + CAPTION_ATTACHMENT_SPAN),
+    )
 }
 
 fn plan_captions(
@@ -478,24 +640,8 @@ fn plan_captions(
     let mut occupancy: Vec<Vec<(usize, usize)>> = Vec::new();
 
     for (segment_index, segment, label) in labeled_segments {
-        let position = anchors
-            .binary_search(&segment.anchor)
-            .expect("segment anchor is indexed");
-        let left_boundary = if position == 0 {
-            MARGIN_X
-        } else {
-            anchors[position - 1] + CAPTION_ATTACHMENT_SPAN + 1
-        };
-        let right_boundary = if position + 1 == anchors.len() {
-            width.saturating_sub(MARGIN_X + 1)
-        } else {
-            anchors[position + 1].saturating_sub(CAPTION_ATTACHMENT_SPAN + 1)
-        };
-        let left_available = segment
-            .anchor
-            .saturating_sub(left_boundary + CAPTION_ATTACHMENT_SPAN);
-        let right_available =
-            right_boundary.saturating_sub(segment.anchor + CAPTION_ATTACHMENT_SPAN);
+        let (left_available, right_available) =
+            caption_availability(segment.anchor, &anchors, width);
         let outward_side = if segment.anchor < width / 2 {
             CaptionSide::Left
         } else {
@@ -597,8 +743,8 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
         });
     }
 
-    let (source_lanes, source_lane_count) = assign_bus_lanes(&segments, true);
-    let (target_lanes, target_lane_count) = assign_bus_lanes(&segments, false);
+    let (source_lanes, source_lane_count) = assign_bus_lanes(&segments, true)?;
+    let (target_lanes, target_lane_count) = assign_bus_lanes(&segments, false)?;
     let (captions, caption_height) = plan_captions(&segments, width)?;
     const SOURCE_STEM_ROWS: usize = 1;
     const BAND_GAP_ROWS: usize = 1;
@@ -617,7 +763,7 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
         let target_row = target_lanes
             .get(&segment_index)
             .map(|lane| target_start + lane);
-        let target_is_track = matches!(segment.to, End::Track(_));
+        let target_is_virtual = matches!(segment.to, End::Virtual(_));
         let vertical_end = final_row;
 
         let mut source_points = vec![(segment.sx, 0)];
@@ -627,7 +773,7 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
         } else {
             debug_assert_eq!(segment.sx, segment.anchor);
         }
-        if target_is_track {
+        if target_is_virtual && segment.label.is_none() {
             if let Some(row) = target_row {
                 push_point(&mut source_points, (segment.anchor, row));
                 push_point(&mut source_points, (segment.tx, row));
@@ -638,7 +784,7 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
             strokes.push(LocalStroke {
                 cells: trace_polyline(&source_points),
                 dashed: segment.dashed(),
-                style: segment.style(),
+                style: segment.route_style(),
                 edge: segment.edge,
             });
         } else {
@@ -646,7 +792,7 @@ fn plan_channel(segments: Vec<Segment>, width: usize) -> Result<ChannelPlan, Dia
             strokes.push(LocalStroke {
                 cells: trace_polyline(&source_points),
                 dashed: segment.dashed(),
-                style: segment.style(),
+                style: segment.route_style(),
                 edge: segment.edge,
             });
 
@@ -834,16 +980,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pass_through_track_keeps_its_placement_column() {
+    fn virtual_segment_uses_its_target_waypoint_as_the_anchor() {
         let mut segments = vec![
             Segment {
                 edge: 0,
-                from: End::Track(0),
-                to: End::Track(0),
+                from: End::Virtual(0),
+                to: End::Virtual(1),
                 sx: 40,
-                tx: 40,
+                tx: 44,
                 anchor: 0,
                 label: None,
+                accented: false,
                 kind: EdgeKind::Sync,
             },
             Segment {
@@ -854,13 +1001,14 @@ mod tests {
                 tx: 60,
                 anchor: 0,
                 label: Some("branch caption".into()),
+                accented: false,
                 kind: EdgeKind::Sync,
             },
         ];
 
-        assign_anchors(&mut segments, 120).expect("tracks should fit");
+        assign_anchors(&mut segments, 120).expect("waypoints should fit");
 
-        assert_eq!(segments[0].anchor, 40);
+        assert_eq!(segments[0].anchor, 44);
     }
 
     #[test]
@@ -875,6 +1023,7 @@ mod tests {
                 tx: anchor,
                 anchor,
                 label: Some("branch caption".into()),
+                accented: false,
                 kind: EdgeKind::Sync,
             }],
             80,
@@ -916,6 +1065,7 @@ mod tests {
                     tx: anchor,
                     anchor,
                     label: Some("a multiline branch caption keeps every line attached".into()),
+                    accented: false,
                     kind: EdgeKind::Sync,
                 }],
                 80,
@@ -939,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn route_lanes_order_fan_out_far_first_and_fan_in_near_first() {
+    fn route_lanes_turn_crossed_vertical_stems_first() {
         let segments = vec![
             Segment {
                 edge: 0,
@@ -949,6 +1099,7 @@ mod tests {
                 tx: 50,
                 anchor: 60,
                 label: None,
+                accented: false,
                 kind: EdgeKind::Sync,
             },
             Segment {
@@ -959,12 +1110,13 @@ mod tests {
                 tx: 40,
                 anchor: 90,
                 label: None,
+                accented: false,
                 kind: EdgeKind::Sync,
             },
         ];
 
-        let (fan_out, _) = assign_bus_lanes(&segments, true);
-        let (fan_in, _) = assign_bus_lanes(&segments, false);
+        let (fan_out, _) = assign_bus_lanes(&segments, true).expect("fan-out lanes");
+        let (fan_in, _) = assign_bus_lanes(&segments, false).expect("fan-in lanes");
 
         assert_eq!(fan_out[&1], 0);
         assert_eq!(fan_out[&0], 1);

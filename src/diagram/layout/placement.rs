@@ -1,39 +1,49 @@
-//! Topology-shaped horizontal placement.
+//! Layered horizontal placement for real nodes and relationship waypoints.
 //!
-//! Each rank forms a coherent block of node territories. Territories reserve
-//! enough room for node boxes and measured relationship captions. Alternating
-//! alignment sweeps move complete rank blocks toward their connected neighbors
-//! while preserving authored order. Long edges receive the nearest corridor that
-//! clears every intervening rank as a complete obstacle.
+//! Every long relationship contributes a virtual entry to each intermediate
+//! rank. Crossing reduction and coordinate assignment therefore see the full
+//! graph before any route is painted. Real nodes keep their authored order;
+//! virtual entries move through the available gaps to keep long relationships
+//! coherent across the ranks they cross.
 
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use super::{caption_width, NodeGeom, CAPTION_ATTACHMENT_SPAN, MARGIN_X};
 use crate::diagram::doc::{DiagramError, Model};
 
 const MIN_NODE_GAP: usize = 6;
 const MAX_NODE_GAP: usize = 18;
+const VIRTUAL_GAP: usize = 3;
 const NATURAL_WIDTH: usize = 96;
-const TRACK_CLEARANCE: usize = 2;
-const TRACK_SEPARATION: usize = 3;
+const ORDER_SWEEPS: usize = 8;
+const POSITION_SWEEPS: usize = 8;
+const DIRECT_NODE_WEIGHT: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Entry {
+    Node(usize),
+    Virtual(usize),
+}
 
 #[derive(Debug, Clone)]
-pub(super) struct Track {
+pub(super) struct VirtualGeom {
     pub edge: usize,
+    pub rank: usize,
     pub x: usize,
-    pub source_rank: usize,
-    pub target_rank: usize,
+    pub accented: bool,
+    width: usize,
 }
 
 pub(super) struct Placement {
     pub width: usize,
-    pub tracks: Vec<Track>,
+    pub virtuals: Vec<VirtualGeom>,
 }
 
-#[derive(Clone, Copy)]
-struct Slot {
-    center: usize,
-    width: usize,
+struct LayeredGraph {
+    ranks: Vec<Vec<Entry>>,
+    virtuals: Vec<VirtualGeom>,
+    neighbors: HashMap<Entry, Vec<Entry>>,
 }
 
 pub(super) fn place(
@@ -42,10 +52,13 @@ pub(super) fn place(
     viewport: usize,
 ) -> Result<Placement, DiagramError> {
     let territories = node_territories(model, nodes);
-    let widest_rank = model
+    let mut graph = expand_long_edges(model);
+    reduce_crossings(model, &mut graph);
+
+    let minimum_rank_width = graph
         .ranks
         .iter()
-        .map(|rank| rank_width(rank, &territories, MIN_NODE_GAP))
+        .map(|rank| rank_width(&graph, rank, &territories, MIN_NODE_GAP))
         .max()
         .unwrap_or(1);
     let channel_width = minimum_channel_width(model);
@@ -54,19 +67,9 @@ pub(super) fn place(
         .as_ref()
         .map(|title| title.chars().count())
         .unwrap_or(1);
-    let long_edges = model
-        .edges
-        .iter()
-        .filter(|edge| model.nodes[edge.to].rank > model.nodes[edge.from].rank + 1)
-        .count();
-    let track_room = if long_edges == 0 {
-        0
-    } else {
-        2 * TRACK_CLEARANCE + long_edges * TRACK_SEPARATION
-    };
-    let minimum_width = widest_rank
+    let minimum_width = minimum_rank_width
         .max(channel_width)
-        .saturating_add(2 * MARGIN_X + track_room)
+        .saturating_add(2 * MARGIN_X)
         .max(title_width + 2 * MARGIN_X);
     let width = if viewport == usize::MAX {
         minimum_width.max(NATURAL_WIDTH)
@@ -74,26 +77,344 @@ pub(super) fn place(
         minimum_width.max(viewport.max(1))
     };
 
-    let max_rank_nodes = model.ranks.iter().map(Vec::len).max().unwrap_or(1);
-    let available = width.saturating_sub(2 * MARGIN_X);
-    let expandable_gaps = max_rank_nodes.saturating_sub(1);
-    let extra = available.saturating_sub(widest_rank);
-    let gap = (MIN_NODE_GAP + extra.checked_div(expandable_gaps).unwrap_or(0)).min(MAX_NODE_GAP);
-
-    let mut slots = place_rank_blocks(model, &territories, width, gap);
-    align_rank_blocks(model, &mut slots, width);
-    center_complete_graph(&mut slots, width);
+    let real_gaps = graph
+        .ranks
+        .iter()
+        .map(|rank| {
+            rank.windows(2)
+                .filter(|pair| matches!(pair, [Entry::Node(_), Entry::Node(_)]))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let extra = width
+        .saturating_sub(2 * MARGIN_X)
+        .saturating_sub(minimum_rank_width);
+    let node_gap = (MIN_NODE_GAP + extra.checked_div(real_gaps).unwrap_or(0)).min(MAX_NODE_GAP);
+    let positions = assign_coordinates(&graph, &territories, width, node_gap);
 
     for (index, node) in nodes.iter_mut().enumerate() {
-        node.x = slots[index].center.saturating_sub(node.w / 2);
+        let center = positions[&Entry::Node(index)];
+        node.x = center.saturating_sub(node.w / 2);
+    }
+    for (index, virtual_node) in graph.virtuals.iter_mut().enumerate() {
+        virtual_node.x = positions[&Entry::Virtual(index)];
     }
 
-    let tracks = place_long_tracks(model, nodes, width)?;
-    Ok(Placement { width, tracks })
+    Ok(Placement {
+        width,
+        virtuals: graph.virtuals,
+    })
+}
+
+fn expand_long_edges(model: &Model) -> LayeredGraph {
+    let mut ranks = model
+        .ranks
+        .iter()
+        .map(|rank| rank.iter().copied().map(Entry::Node).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let mut virtuals = Vec::new();
+    let mut neighbors: HashMap<Entry, Vec<Entry>> = HashMap::new();
+
+    for (edge_index, edge) in model.edges.iter().enumerate() {
+        let source_rank = model.nodes[edge.from].rank;
+        let target_rank = model.nodes[edge.to].rank;
+        let mut chain = vec![Entry::Node(edge.from)];
+        for (rank, entries) in ranks
+            .iter_mut()
+            .enumerate()
+            .take(target_rank)
+            .skip(source_rank + 1)
+        {
+            let virtual_node = virtuals.len();
+            virtuals.push(VirtualGeom {
+                edge: edge_index,
+                rank,
+                x: 0,
+                accented: false,
+                width: edge
+                    .label
+                    .as_deref()
+                    .map(relationship_territory)
+                    .unwrap_or(1),
+            });
+            let entry = Entry::Virtual(virtual_node);
+            entries.push(entry);
+            chain.push(entry);
+        }
+        chain.push(Entry::Node(edge.to));
+        for pair in chain.windows(2) {
+            neighbors.entry(pair[0]).or_default().push(pair[1]);
+            neighbors.entry(pair[1]).or_default().push(pair[0]);
+        }
+    }
+
+    LayeredGraph {
+        ranks,
+        virtuals,
+        neighbors,
+    }
+}
+
+fn reduce_crossings(model: &Model, graph: &mut LayeredGraph) {
+    let mut best_ranks = graph.ranks.clone();
+    let mut best_crossings = crossing_count(model, graph);
+    for _ in 0..ORDER_SWEEPS {
+        for rank in 1..graph.ranks.len() {
+            reorder_rank(model, graph, rank, rank - 1);
+        }
+        retain_better_order(model, graph, &mut best_ranks, &mut best_crossings);
+        for rank in (0..graph.ranks.len().saturating_sub(1)).rev() {
+            reorder_rank(model, graph, rank, rank + 1);
+        }
+        retain_better_order(model, graph, &mut best_ranks, &mut best_crossings);
+    }
+    graph.ranks = best_ranks;
+}
+
+fn retain_better_order(
+    model: &Model,
+    graph: &LayeredGraph,
+    best_ranks: &mut Vec<Vec<Entry>>,
+    best_crossings: &mut usize,
+) {
+    let crossings = crossing_count(model, graph);
+    if crossings < *best_crossings {
+        *best_crossings = crossings;
+        *best_ranks = graph.ranks.clone();
+    }
+}
+
+fn crossing_count(model: &Model, graph: &LayeredGraph) -> usize {
+    let positions = entry_positions(&graph.ranks);
+    let mut crossings = 0;
+    for rank in 0..graph.ranks.len().saturating_sub(1) {
+        let mut relationships = Vec::new();
+        for source in &graph.ranks[rank] {
+            for target in graph.neighbors.get(source).into_iter().flatten() {
+                if entry_rank(*target, model, graph) == rank + 1 {
+                    relationships.push((positions[source], positions[target]));
+                }
+            }
+        }
+        for left in 0..relationships.len() {
+            for right in left + 1..relationships.len() {
+                let (left_source, left_target) = relationships[left];
+                let (right_source, right_target) = relationships[right];
+                if left_source != right_source
+                    && left_target != right_target
+                    && (left_source < right_source) != (left_target < right_target)
+                {
+                    crossings += 1;
+                }
+            }
+        }
+    }
+    crossings
+}
+
+fn reorder_rank(model: &Model, graph: &mut LayeredGraph, rank: usize, adjacent_rank: usize) {
+    if graph.ranks[rank].len() < 2 {
+        return;
+    }
+    let positions = entry_positions(&graph.ranks);
+    let original_positions = graph.ranks[rank]
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| (*entry, position))
+        .collect::<HashMap<_, _>>();
+    let mut ordered = graph.ranks[rank].clone();
+    ordered.sort_by(|left, right| {
+        barycenter(*left, graph, model, &positions, adjacent_rank)
+            .cmp(&barycenter(*right, graph, model, &positions, adjacent_rank))
+            .then_with(|| original_positions[left].cmp(&original_positions[right]))
+    });
+
+    // Hints define real-node order. Crossing reduction may only decide which
+    // gaps the virtual relationship entries occupy.
+    let real_slots = ordered
+        .iter()
+        .enumerate()
+        .filter_map(|(position, entry)| matches!(entry, Entry::Node(_)).then_some(position))
+        .collect::<Vec<_>>();
+    for (slot, node) in real_slots.into_iter().zip(model.ranks[rank].iter()) {
+        ordered[slot] = Entry::Node(*node);
+    }
+    graph.ranks[rank] = ordered;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Rational {
+    numerator: usize,
+    denominator: usize,
+}
+
+impl Ord for Rational {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.numerator * other.denominator).cmp(&(other.numerator * self.denominator))
+    }
+}
+
+impl PartialOrd for Rational {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn barycenter(
+    entry: Entry,
+    graph: &LayeredGraph,
+    model: &Model,
+    positions: &HashMap<Entry, usize>,
+    adjacent_rank: usize,
+) -> Rational {
+    let neighbors = graph
+        .neighbors
+        .get(&entry)
+        .into_iter()
+        .flatten()
+        .filter(|neighbor| entry_rank(**neighbor, model, graph) == adjacent_rank)
+        .collect::<Vec<_>>();
+    if neighbors.is_empty() {
+        return Rational {
+            numerator: positions[&entry],
+            denominator: 1,
+        };
+    }
+    Rational {
+        numerator: neighbors.iter().map(|neighbor| positions[neighbor]).sum(),
+        denominator: neighbors.len(),
+    }
+}
+
+fn entry_rank(entry: Entry, model: &Model, graph: &LayeredGraph) -> usize {
+    match entry {
+        Entry::Node(node) => model.nodes[node].rank,
+        Entry::Virtual(virtual_node) => graph.virtuals[virtual_node].rank,
+    }
+}
+
+fn entry_positions(ranks: &[Vec<Entry>]) -> HashMap<Entry, usize> {
+    ranks
+        .iter()
+        .flat_map(|rank| {
+            rank.iter()
+                .enumerate()
+                .map(|(position, entry)| (*entry, position))
+        })
+        .collect()
+}
+
+fn assign_coordinates(
+    graph: &LayeredGraph,
+    territories: &[usize],
+    width: usize,
+    node_gap: usize,
+) -> HashMap<Entry, usize> {
+    let mut positions = HashMap::new();
+    for rank in &graph.ranks {
+        let span = rank_width(graph, rank, territories, node_gap);
+        let mut cursor = (width.saturating_sub(span)) / 2;
+        for (index, entry) in rank.iter().enumerate() {
+            let entry_width = entry_width(graph, *entry, territories);
+            positions.insert(*entry, cursor + entry_width / 2);
+            cursor += entry_width;
+            if let Some(next) = rank.get(index + 1) {
+                cursor += entry_gap(*entry, *next, node_gap);
+            }
+        }
+    }
+
+    for _ in 0..POSITION_SWEEPS {
+        for rank in 1..graph.ranks.len() {
+            relax_rank(graph, territories, &mut positions, rank, width, node_gap);
+        }
+        for rank in (0..graph.ranks.len().saturating_sub(1)).rev() {
+            relax_rank(graph, territories, &mut positions, rank, width, node_gap);
+        }
+    }
+    positions
+}
+
+fn relax_rank(
+    graph: &LayeredGraph,
+    territories: &[usize],
+    positions: &mut HashMap<Entry, usize>,
+    rank: usize,
+    width: usize,
+    node_gap: usize,
+) {
+    let entries = &graph.ranks[rank];
+    if entries.is_empty() {
+        return;
+    }
+    let mut desired = entries
+        .iter()
+        .map(|entry| {
+            let mut neighbors = graph
+                .neighbors
+                .get(entry)
+                .into_iter()
+                .flatten()
+                .flat_map(|neighbor| {
+                    let weight = usize::from(matches!(
+                        (*entry, *neighbor),
+                        (Entry::Node(_), Entry::Node(_))
+                    )) * (DIRECT_NODE_WEIGHT - 1)
+                        + 1;
+                    std::iter::repeat_n(positions[neighbor], weight)
+                })
+                .collect::<Vec<_>>();
+            if neighbors.is_empty() {
+                positions[entry]
+            } else {
+                median(&mut neighbors)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let first_width = entry_width(graph, entries[0], territories);
+    desired[0] = desired[0].max(MARGIN_X + first_width / 2);
+    for index in 1..entries.len() {
+        let separation = center_separation(
+            graph,
+            entries[index - 1],
+            entries[index],
+            territories,
+            node_gap,
+        );
+        desired[index] = desired[index].max(desired[index - 1] + separation);
+    }
+
+    let last = entries.len() - 1;
+    let last_width = entry_width(graph, entries[last], territories);
+    let maximum = width.saturating_sub(MARGIN_X + last_width.div_ceil(2));
+    desired[last] = desired[last].min(maximum);
+    for index in (0..last).rev() {
+        let separation = center_separation(
+            graph,
+            entries[index],
+            entries[index + 1],
+            territories,
+            node_gap,
+        );
+        desired[index] = desired[index].min(desired[index + 1].saturating_sub(separation));
+    }
+
+    let minimum = MARGIN_X + first_width / 2;
+    if desired[0] < minimum {
+        let shift = minimum - desired[0];
+        for center in &mut desired {
+            *center += shift;
+        }
+    }
+    for (entry, center) in entries.iter().zip(desired) {
+        positions.insert(*entry, center);
+    }
 }
 
 fn node_territories(model: &Model, nodes: &[NodeGeom]) -> Vec<usize> {
-    let mut territories: Vec<usize> = nodes.iter().map(|node| node.w).collect();
+    let mut territories = nodes.iter().map(|node| node.w).collect::<Vec<_>>();
     for edge in &model.edges {
         if let Some(label) = &edge.label {
             let caption_territory = caption_width(label) + CAPTION_ATTACHMENT_SPAN + 1;
@@ -106,13 +427,13 @@ fn node_territories(model: &Model, nodes: &[NodeGeom]) -> Vec<usize> {
 fn minimum_channel_width(model: &Model) -> usize {
     let mut required = 1;
     for channel in 0..model.ranks.len().saturating_sub(1) {
-        let active: Vec<_> = model
+        let active = model
             .edges
             .iter()
             .filter(|edge| {
                 model.nodes[edge.from].rank <= channel && model.nodes[edge.to].rank > channel
             })
-            .collect();
+            .collect::<Vec<_>>();
         let labeled = active
             .iter()
             .filter_map(|edge| {
@@ -125,7 +446,6 @@ fn minimum_channel_width(model: &Model) -> usize {
         if labeled.is_empty() {
             continue;
         }
-
         let gaps = active.len().saturating_sub(1);
         let caption_gaps = gaps.min(labeled.len() * 2);
         let plain_gaps = gaps - caption_gaps;
@@ -133,184 +453,58 @@ fn minimum_channel_width(model: &Model) -> usize {
             .into_iter()
             .max()
             .unwrap_or(super::MIN_CAPTION_WIDTH);
-        let caption_span = widest_caption + CAPTION_ATTACHMENT_SPAN + 1;
-        let span = caption_gaps * caption_span + plain_gaps * TRACK_SEPARATION;
-        let outer_caption_room = 2 * caption_span;
-        required = required.max(span + outer_caption_room);
+        let caption_separation = widest_caption + 2 * CAPTION_ATTACHMENT_SPAN + 1;
+        let outer_caption_room = widest_caption + CAPTION_ATTACHMENT_SPAN + 1;
+        let span = caption_gaps * caption_separation + plain_gaps * VIRTUAL_GAP;
+        required = required.max(span + 2 * outer_caption_room);
     }
     required
 }
 
-fn rank_width(rank: &[usize], territories: &[usize], gap: usize) -> usize {
-    rank.iter().map(|node| territories[*node]).sum::<usize>() + rank.len().saturating_sub(1) * gap
+fn rank_width(
+    graph: &LayeredGraph,
+    rank: &[Entry],
+    territories: &[usize],
+    node_gap: usize,
+) -> usize {
+    rank.iter()
+        .map(|entry| entry_width(graph, *entry, territories))
+        .sum::<usize>()
+        + rank
+            .windows(2)
+            .map(|pair| entry_gap(pair[0], pair[1], node_gap))
+            .sum::<usize>()
 }
 
-fn place_rank_blocks(model: &Model, territories: &[usize], width: usize, gap: usize) -> Vec<Slot> {
-    let mut slots = vec![
-        Slot {
-            center: 0,
-            width: 1
-        };
-        model.nodes.len()
-    ];
-    for rank in &model.ranks {
-        let span = rank_width(rank, territories, gap);
-        let mut x = (width.saturating_sub(span)) / 2;
-        for node in rank {
-            let territory = territories[*node];
-            slots[*node] = Slot {
-                center: x + territory / 2,
-                width: territory,
-            };
-            x += territory + gap;
-        }
-    }
-    slots
-}
-
-fn align_rank_blocks(model: &Model, slots: &mut [Slot], width: usize) {
-    for _ in 0..6 {
-        for rank in 0..model.ranks.len() {
-            align_rank(model, slots, rank, width);
-        }
-        for rank in (0..model.ranks.len()).rev() {
-            align_rank(model, slots, rank, width);
-        }
+fn entry_width(graph: &LayeredGraph, entry: Entry, territories: &[usize]) -> usize {
+    match entry {
+        Entry::Node(node) => territories[node],
+        Entry::Virtual(virtual_node) => graph.virtuals[virtual_node].width,
     }
 }
 
-fn align_rank(model: &Model, slots: &mut [Slot], rank: usize, width: usize) {
-    let mut deltas = Vec::new();
-    for node in &model.ranks[rank] {
-        let mut neighbors = Vec::new();
-        for edge in &model.edges {
-            if edge.from == *node {
-                neighbors.push(slots[edge.to].center);
-            }
-            if edge.to == *node {
-                neighbors.push(slots[edge.from].center);
-            }
-        }
-        if !neighbors.is_empty() {
-            deltas.push(median(&mut neighbors) as isize - slots[*node].center as isize);
-        }
-    }
-    if deltas.is_empty() {
-        return;
-    }
-    deltas.sort_unstable();
-    let mut delta = deltas[deltas.len() / 2];
-
-    let first = model.ranks[rank][0];
-    let last = *model.ranks[rank].last().expect("rank is non-empty");
-    let left = slots[first].center.saturating_sub(slots[first].width / 2);
-    let right = slots[last].center + slots[last].width.div_ceil(2);
-    delta = delta.max(MARGIN_X as isize - left as isize);
-    delta = delta.min((width.saturating_sub(MARGIN_X + right)) as isize);
-
-    for node in &model.ranks[rank] {
-        slots[*node].center = slots[*node].center.saturating_add_signed(delta);
+fn entry_gap(left: Entry, right: Entry, node_gap: usize) -> usize {
+    if matches!((left, right), (Entry::Node(_), Entry::Node(_))) {
+        node_gap
+    } else {
+        VIRTUAL_GAP
     }
 }
 
-fn center_complete_graph(slots: &mut [Slot], width: usize) {
-    let left = slots
-        .iter()
-        .map(|slot| slot.center.saturating_sub(slot.width / 2))
-        .min()
-        .unwrap_or(MARGIN_X);
-    let right = slots
-        .iter()
-        .map(|slot| slot.center + slot.width.div_ceil(2))
-        .max()
-        .unwrap_or(width.saturating_sub(MARGIN_X));
-    let target = width / 2;
-    let current = (left + right) / 2;
-    let mut delta = target as isize - current as isize;
-    delta = delta.max(MARGIN_X as isize - left as isize);
-    delta = delta.min((width.saturating_sub(MARGIN_X + right)) as isize);
-    for slot in slots {
-        slot.center = slot.center.saturating_add_signed(delta);
-    }
+fn center_separation(
+    graph: &LayeredGraph,
+    left: Entry,
+    right: Entry,
+    territories: &[usize],
+    node_gap: usize,
+) -> usize {
+    entry_width(graph, left, territories).div_ceil(2)
+        + entry_gap(left, right, node_gap)
+        + entry_width(graph, right, territories) / 2
 }
 
-fn place_long_tracks(
-    model: &Model,
-    nodes: &[NodeGeom],
-    width: usize,
-) -> Result<Vec<Track>, DiagramError> {
-    let mut tracks = Vec::new();
-    let mut occupied = HashSet::new();
-
-    for (edge_index, edge) in model.edges.iter().enumerate() {
-        let source_rank = model.nodes[edge.from].rank;
-        let target_rank = model.nodes[edge.to].rank;
-        if target_rank <= source_rank + 1 {
-            continue;
-        }
-
-        let source = nodes[edge.from].center();
-        let target = nodes[edge.to].center();
-        let x = (MARGIN_X + 1..width.saturating_sub(MARGIN_X + 1))
-            .filter(|candidate| {
-                !occupied
-                    .iter()
-                    .any(|track: &usize| track.abs_diff(*candidate) < TRACK_SEPARATION)
-                    && (source_rank + 1..target_rank).all(|rank| {
-                        let left = model.ranks[rank]
-                            .iter()
-                            .map(|node| nodes[*node].x)
-                            .min()
-                            .unwrap_or(MARGIN_X)
-                            .saturating_sub(TRACK_CLEARANCE);
-                        let right = model.ranks[rank]
-                            .iter()
-                            .map(|node| nodes[*node].x + nodes[*node].w - 1)
-                            .max()
-                            .unwrap_or(width.saturating_sub(MARGIN_X + 1))
-                            + TRACK_CLEARANCE;
-                        *candidate < left || *candidate > right
-                    })
-            })
-            .min_by_key(|candidate| {
-                let crossings = tracks
-                    .iter()
-                    .filter(|track: &&Track| {
-                        let crosses_source_rank =
-                            track.source_rank < source_rank && track.target_rank > source_rank;
-                        let crosses_target_rank =
-                            track.source_rank < target_rank && track.target_rank > target_rank;
-                        (crosses_source_rank && between(track.x, source, *candidate))
-                            || (crosses_target_rank && between(track.x, target, *candidate))
-                    })
-                    .count();
-                (
-                    crossings,
-                    candidate.abs_diff(target) * 2 + candidate.abs_diff(source),
-                    candidate.abs_diff(target),
-                    *candidate,
-                )
-            })
-            .ok_or_else(|| {
-                DiagramError::Routing(format!(
-                    "no clear rank corridor from `{}` to `{}`",
-                    model.nodes[edge.from].id, model.nodes[edge.to].id
-                ))
-            })?;
-
-        occupied.insert(x);
-        tracks.push(Track {
-            edge: edge_index,
-            x,
-            source_rank,
-            target_rank,
-        });
-    }
-    Ok(tracks)
-}
-
-fn between(value: usize, a: usize, b: usize) -> bool {
-    value > a.min(b) && value < a.max(b)
+fn relationship_territory(label: &str) -> usize {
+    caption_width(label) + 2 * CAPTION_ATTACHMENT_SPAN + 1
 }
 
 fn median(values: &mut [usize]) -> usize {
@@ -326,28 +520,24 @@ fn median(values: &mut [usize]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagram::doc::{EdgeKind, Model, ModelEdge, ModelNode, NodeKind};
+    use crate::diagram::doc::{EdgeKind, ModelEdge, ModelNode, NodeKind};
 
-    #[test]
-    fn long_track_clears_the_intervening_rank_instead_of_the_whole_graph() {
-        let model = Model {
+    fn layered_model() -> Model {
+        Model {
             title: None,
             ticket: None,
             nodes: vec![
                 ModelNode {
-                    id: "source".into(),
                     label: "Source".into(),
                     kind: NodeKind::Service,
                     rank: 0,
                 },
                 ModelNode {
-                    id: "middle".into(),
                     label: "Middle".into(),
                     kind: NodeKind::Service,
                     rank: 1,
                 },
                 ModelNode {
-                    id: "target".into(),
                     label: "Target".into(),
                     kind: NodeKind::Service,
                     rank: 2,
@@ -361,15 +551,82 @@ mod tests {
             }],
             notes: Vec::new(),
             ranks: vec![vec![0], vec![1], vec![2]],
+        }
+    }
+
+    #[test]
+    fn long_relationships_expand_into_every_intermediate_rank() {
+        let graph = expand_long_edges(&layered_model());
+
+        assert_eq!(graph.virtuals.len(), 1);
+        assert_eq!(graph.virtuals[0].edge, 0);
+        assert_eq!(graph.virtuals[0].rank, 1);
+        assert_eq!(
+            graph.virtuals[0].width,
+            relationship_territory("long relationship")
+        );
+        assert!(matches!(graph.ranks[1][0], Entry::Node(1)));
+        assert!(graph.ranks[1].contains(&Entry::Virtual(0)));
+    }
+
+    #[test]
+    fn crossing_reduction_preserves_authored_real_node_order() {
+        let model = layered_model();
+        let mut graph = expand_long_edges(&model);
+        reduce_crossings(&model, &mut graph);
+
+        let real_nodes = graph.ranks[1]
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Node(node) => Some(*node),
+                Entry::Virtual(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(real_nodes, model.ranks[1]);
+    }
+
+    #[test]
+    fn converging_long_relationships_keep_a_crossing_free_rank_order() {
+        let nodes = (0..6)
+            .map(|index| ModelNode {
+                label: index.to_string(),
+                kind: NodeKind::Service,
+                rank: [0, 1, 2, 3, 3, 4][index],
+            })
+            .collect();
+        let edge = |from, to| ModelEdge {
+            from,
+            to,
+            label: None,
+            kind: EdgeKind::Sync,
         };
-        let nodes = vec![
-            NodeGeom::test_at(40, 11),
-            NodeGeom::test_at(60, 11),
-            NodeGeom::test_at(90, 11),
-        ];
+        let model = Model {
+            title: None,
+            ticket: None,
+            nodes,
+            edges: vec![
+                edge(0, 1),
+                edge(0, 4),
+                edge(1, 2),
+                edge(1, 4),
+                edge(2, 3),
+                edge(2, 5),
+                edge(4, 5),
+            ],
+            notes: Vec::new(),
+            ranks: vec![vec![0], vec![1], vec![2], vec![3, 4], vec![5]],
+        };
+        let mut graph = expand_long_edges(&model);
+        reduce_crossings(&model, &mut graph);
 
-        let tracks = place_long_tracks(&model, &nodes, 120).expect("rank corridor should fit");
-
-        assert_eq!(tracks[0].x, nodes[2].center());
+        assert_eq!(graph.ranks[1], vec![Entry::Node(1), Entry::Virtual(0)]);
+        assert_eq!(
+            graph.ranks[2],
+            vec![Entry::Node(2), Entry::Virtual(2), Entry::Virtual(1)]
+        );
+        assert_eq!(
+            graph.ranks[3],
+            vec![Entry::Node(3), Entry::Virtual(3), Entry::Node(4)]
+        );
     }
 }
