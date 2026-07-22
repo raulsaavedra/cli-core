@@ -1762,8 +1762,7 @@ enum Block {
         text: String,
     },
     List {
-        ordered: bool,
-        items: Vec<String>,
+        items: Vec<ListItem>,
     },
     Blockquote {
         lines: Vec<String>,
@@ -1778,6 +1777,13 @@ enum Block {
     },
     Hr,
     Blank,
+}
+
+#[derive(Debug)]
+struct ListItem {
+    depth: usize,
+    ordered: bool,
+    text: String,
 }
 
 fn parse_blocks(content: &str) -> Vec<Block> {
@@ -1828,21 +1834,15 @@ fn parse_blocks(content: &str) -> Vec<Block> {
 
         // Unordered list.
         if is_unordered_list_item(line) {
-            let items = collect_unordered_list(&lines, &mut i);
-            blocks.push(Block::List {
-                ordered: false,
-                items,
-            });
+            let items = collect_list(&lines, &mut i);
+            blocks.push(Block::List { items });
             continue;
         }
 
         // Ordered list.
         if is_ordered_list_item(line) {
-            let items = collect_ordered_list(&lines, &mut i);
-            blocks.push(Block::List {
-                ordered: true,
-                items,
-            });
+            let items = collect_list(&lines, &mut i);
+            blocks.push(Block::List { items });
             continue;
         }
 
@@ -2030,102 +2030,116 @@ fn collect_blockquote(lines: &[&str], i: &mut usize) -> Vec<String> {
     bq_lines
 }
 
-fn is_unordered_list_item(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    bytes.len() >= 2
-        && (bytes[0] == b'-' || bytes[0] == b'*' || bytes[0] == b'+')
-        && bytes[1] == b' '
+struct ListMarker<'a> {
+    indent: usize,
+    ordered: bool,
+    text: &'a str,
 }
 
-fn collect_unordered_list(lines: &[&str], i: &mut usize) -> Vec<String> {
-    let mut items = Vec::new();
-    while *i < lines.len() {
-        let line = lines[*i];
-        if is_unordered_list_item(line) {
-            items.push(line[2..].to_string());
-            *i += 1;
-            // Continuation lines (indented).
-            while *i < lines.len()
-                && !lines[*i].trim().is_empty()
-                && lines[*i].starts_with("  ")
-                && !is_unordered_list_item(lines[*i])
-            {
-                let last = items.last_mut().unwrap();
-                last.push(' ');
-                last.push_str(lines[*i].trim());
-                *i += 1;
-            }
-        } else if lines[*i].trim().is_empty() {
-            // Blank line inside list — peek ahead.
-            if *i + 1 < lines.len() && is_unordered_list_item(lines[*i + 1]) {
-                *i += 1;
-                continue;
-            }
-            break;
-        } else {
-            break;
+fn leading_indent(line: &str) -> (usize, usize) {
+    let mut columns = 0;
+    let mut bytes = 0;
+    for ch in line.chars() {
+        match ch {
+            ' ' => columns += 1,
+            '\t' => columns += 4,
+            _ => break,
         }
+        bytes += ch.len_utf8();
     }
-    items
+    (columns, bytes)
 }
 
-fn is_ordered_list_item(line: &str) -> bool {
+fn parse_list_marker(line: &str) -> Option<ListMarker<'_>> {
+    let (indent, marker_start) = leading_indent(line);
+    let marker = &line[marker_start..];
+    let bytes = marker.as_bytes();
+
+    if bytes.len() >= 2 && matches!(bytes[0], b'-' | b'*' | b'+') && bytes[1] == b' ' {
+        return Some(ListMarker {
+            indent,
+            ordered: false,
+            text: &marker[2..],
+        });
+    }
+
     let mut idx = 0;
-    let bytes = line.as_bytes();
     while idx < bytes.len() && bytes[idx].is_ascii_digit() {
         idx += 1;
     }
     if idx == 0 || idx >= bytes.len() {
-        return false;
+        return None;
     }
     if bytes[idx] != b'.' && bytes[idx] != b')' {
-        return false;
+        return None;
     }
-    idx + 1 < bytes.len() && bytes[idx + 1] == b' '
+    if idx + 1 >= bytes.len() || bytes[idx + 1] != b' ' {
+        return None;
+    }
+
+    Some(ListMarker {
+        indent,
+        ordered: true,
+        text: &marker[idx + 2..],
+    })
 }
 
-fn ordered_list_item_text(line: &str) -> &str {
-    let bytes = line.as_bytes();
-    let mut idx = 0;
-    while idx < bytes.len() && bytes[idx].is_ascii_digit() {
-        idx += 1;
-    }
-    // Skip the '.' or ')' and the space.
-    if idx < bytes.len() && (bytes[idx] == b'.' || bytes[idx] == b')') {
-        idx += 1;
-    }
-    if idx < bytes.len() && bytes[idx] == b' ' {
-        idx += 1;
-    }
-    &line[idx..]
+fn is_unordered_list_item(line: &str) -> bool {
+    parse_list_marker(line).is_some_and(|marker| marker.indent == 0 && !marker.ordered)
 }
 
-fn collect_ordered_list(lines: &[&str], i: &mut usize) -> Vec<String> {
+fn is_ordered_list_item(line: &str) -> bool {
+    parse_list_marker(line).is_some_and(|marker| marker.indent == 0 && marker.ordered)
+}
+
+fn collect_list(lines: &[&str], i: &mut usize) -> Vec<ListItem> {
     let mut items = Vec::new();
+    let root_indent = parse_list_marker(lines[*i])
+        .map(|marker| marker.indent)
+        .unwrap_or(0);
+    let mut indent_levels = vec![root_indent];
+
     while *i < lines.len() {
         let line = lines[*i];
-        if is_ordered_list_item(line) {
-            items.push(ordered_list_item_text(line).to_string());
-            *i += 1;
-            // Continuation lines.
-            while *i < lines.len()
-                && !lines[*i].trim().is_empty()
-                && lines[*i].starts_with("  ")
-                && !is_ordered_list_item(lines[*i])
-            {
-                let last = items.last_mut().unwrap();
-                last.push(' ');
-                last.push_str(lines[*i].trim());
-                *i += 1;
+        if let Some(marker) = parse_list_marker(line) {
+            if marker.indent < root_indent {
+                break;
             }
+
+            while indent_levels.len() > 1 && marker.indent < *indent_levels.last().unwrap() {
+                indent_levels.pop();
+            }
+            if marker.indent > *indent_levels.last().unwrap() {
+                indent_levels.push(marker.indent);
+            }
+
+            items.push(ListItem {
+                depth: indent_levels.len() - 1,
+                ordered: marker.ordered,
+                text: marker.text.to_string(),
+            });
+            *i += 1;
         } else if lines[*i].trim().is_empty() {
-            if *i + 1 < lines.len() && is_ordered_list_item(lines[*i + 1]) {
+            if *i + 1 < lines.len()
+                && parse_list_marker(lines[*i + 1])
+                    .is_some_and(|marker| marker.indent >= root_indent)
+            {
                 *i += 1;
                 continue;
             }
             break;
         } else {
-            break;
+            let (indent, _) = leading_indent(line);
+            let Some(item) = items.last_mut() else {
+                break;
+            };
+            let item_indent = indent_levels[item.depth];
+            if indent <= item_indent {
+                break;
+            }
+            item.text.push(' ');
+            item.text.push_str(line.trim());
+            *i += 1;
         }
     }
     items
@@ -2224,21 +2238,39 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 out.extend(wrapped);
             }
 
-            Block::List { ordered, items } => {
+            Block::List { items } => {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
                 }
-                for (idx, item) in items.iter().enumerate() {
-                    let (bullet, bullet_plain_width) = if *ordered {
-                        let num = format!("{}.", idx + 1);
+                let mut ordered_counts: Vec<usize> = Vec::new();
+                let mut ordered_levels: Vec<bool> = Vec::new();
+                for item in items {
+                    ordered_counts.truncate(item.depth + 1);
+                    ordered_levels.truncate(item.depth + 1);
+                    while ordered_counts.len() <= item.depth {
+                        ordered_counts.push(0);
+                        ordered_levels.push(false);
+                    }
+
+                    let indent = "  ".repeat(item.depth);
+                    let (bullet, bullet_plain_width) = if item.ordered {
+                        if !ordered_levels[item.depth] {
+                            ordered_counts[item.depth] = 0;
+                        }
+                        ordered_counts[item.depth] += 1;
+                        let num = format!("{}.", ordered_counts[item.depth]);
                         let plain_width = num.len() + 1; // "N. "
                         (format!("{} ", ansi_dim(&num)), plain_width)
                     } else {
+                        ordered_counts[item.depth] = 0;
                         (format!("{} ", ansi_dim("\u{2022}")), 2) // "• "
                     };
-                    let hang_indent = " ".repeat(bullet_plain_width);
+                    ordered_levels[item.depth] = item.ordered;
+
+                    let prefix_plain_width = indent.len() + bullet_plain_width;
+                    let hang_indent = " ".repeat(prefix_plain_width);
                     let styled = render_inline(
-                        item,
+                        &item.text,
                         &mut ctx.links,
                         &mut ctx.seen_links,
                         &mut ctx.link_occurrences,
@@ -2246,7 +2278,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                         &mut ctx.seen_file_refs,
                         &mut ctx.file_ref_occurrences,
                     );
-                    let item_width = ctx.width.saturating_sub(bullet_plain_width);
+                    let item_width = ctx.width.saturating_sub(prefix_plain_width);
                     let effective_width = if item_width > 10 {
                         item_width
                     } else {
@@ -2254,7 +2286,7 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                     };
                     let wrapped = wrap_line(&styled, effective_width, &hang_indent);
                     if !wrapped.is_empty() {
-                        out.push(format!("{bullet}{}", wrapped[0]));
+                        out.push(format!("{indent}{bullet}{}", wrapped[0]));
                         for w in &wrapped[1..] {
                             out.push(w.clone());
                         }
@@ -3395,6 +3427,38 @@ fn map_file_ref_occurrences(occurrences: &[FileRef], plain: &[String]) -> Vec<Fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_lists_preserve_hierarchy_and_marker_type() {
+        let content = "- Login migration:\n  1. Verify the migrated password.\n  2. Create the Cognito identity.\n- Account operations:\n    - Read the account.\n    - Update the profile.";
+        let result = render(content, 80);
+
+        assert_eq!(
+            result.plain,
+            vec![
+                "• Login migration:",
+                "  1. Verify the migrated password.",
+                "  2. Create the Cognito identity.",
+                "• Account operations:",
+                "  • Read the account.",
+                "  • Update the profile.",
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_list_wrapping_aligns_with_item_text() {
+        let content = "- Parent\n  - A nested item with enough words to wrap across multiple terminal lines cleanly";
+        let result = render(content, 32);
+
+        assert_eq!(result.plain[0], "• Parent");
+        assert_eq!(result.plain[1], "  • A nested item with enough");
+        assert!(
+            result.plain[2].starts_with("    words"),
+            "wrapped text should align after the nested bullet: {:?}",
+            result.plain
+        );
+    }
 
     #[test]
     fn sketch_blocks_render_as_diagrams() {
