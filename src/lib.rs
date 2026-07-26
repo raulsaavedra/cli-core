@@ -3,7 +3,6 @@ pub mod diagram;
 pub mod markdown;
 pub mod nvim;
 pub mod output;
-pub mod skills;
 pub mod sqlite;
 pub mod stdio;
 
@@ -14,6 +13,5 @@ pub use nvim::{
     NvimQuitCwd, NvimTarget, HANDOFF_ENV, QUIT_CWD_ENV,
 };
 pub use output::{errorf, json, success};
-pub use skills::{install, resolve_default_skills_dirs, resolve_skills_dir, InstallOptions};
 pub use sqlite::{apply_pragmas, db_path, ensure_dir_for_file, open_sqlite, OpenOptions};
 pub use stdio::read_stdin;

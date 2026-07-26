@@ -5,7 +5,6 @@ Shared Rust crate for building local and agent-friendly CLIs.
 `cli-core` is intentionally small. It provides reusable building blocks that show up across multiple command-line tools:
 
 - `output` — JSON and human-readable terminal output
-- `skills` — install agent skill directories into the default locations or another destination
 - `sqlite` — open local SQLite databases with sensible defaults for CLI workloads
 - `stdio` — read piped stdin content
 - `markdown` — render Markdown in the terminal and extract plain-text metadata
@@ -33,16 +32,6 @@ Small helpers for writing machine-readable and human-readable output.
 - `json<T: Serialize>(value: &T)` — JSON-encode a value to stdout with 2-space indentation
 - `success(msg: &str)` — write a message to stdout with a trailing newline
 - `errorf(msg: &str)` — write a message to stderr with a trailing newline
-
-### `skills`
-
-Helpers for installing a skill directory into an agent skills folder.
-
-- `resolve_default_skills_dirs() -> io::Result<Vec<PathBuf>>` — returns the default destination: `~/.agents/skills`
-- `resolve_skills_dir(dest: Option<&str>) -> io::Result<PathBuf>` — returns the absolute path of `dest`, or `~/.agents/skills` when `None`
-- `install(opts: &InstallOptions) -> io::Result<PathBuf>` — copy or symlink a skill directory to the destination; returns the installed path
-
-`InstallOptions` fields: `src_dir`, `dest_dir`, `name` (optional override), `overwrite`, `link`.
 
 ### `sqlite`
 
@@ -141,6 +130,15 @@ Environment contracts:
 - `NVIM_HANDOFF` points Neovim at the structured JSON handoff file.
 - `NVIM_QUIT_CWD_FILE` points Neovim at a writable file. A Neovim quit-to-terminal action writes the target cwd into that file; the parent CLI can then exit instead of restoring its TUI, and a shell wrapper can `cd` to the written directory.
 
+## Install scripts
+
+`scripts/install-binary.sh` is sourced by each CLI's `install.sh`.
+
+- `install_binary <src> <dest>` — copy a release binary into place, strip the quarantine attribute, and ad-hoc codesign it on macOS
+- `install_cli_skills <repo-root>` — symlink every `skills/*/` directory containing a `SKILL.md` into `~/.claude/skills`, overriding the destination with `CLAUDE_SKILLS_DIR`
+
+Skills are symlinked rather than copied so the repository stays the only copy.
+
 ## Development
 
 ```bash
@@ -157,7 +155,7 @@ Included:
 - reusable helpers for local CLI infrastructure
 - local SQLite bootstrapping
 - terminal rendering utilities
-- skill-install helpers for agent workflows
+- shared install-script helpers for binaries and skills
 - ANSI-to-ratatui conversion for TUI consumers
 - Neovim handoff helpers for local CLI/TUI workflows
 
