@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publish a repository's own skills into the default Claude configuration
-# directory. Account profiles mirror that directory, so a repository never needs
-# to know which accounts exist.
+# Publish a repository's own skills into the shared agent skills directory.
 install_cli_skills() {
   local root="$1"
-  local skills_dir="${CLAUDE_SKILLS_DIR:-${HOME}/.claude/skills}"
+  local skills_dir="${AGENTS_SKILLS_DIR:-${HOME}/.agents/skills}"
   local skill
 
   for skill in "$root"/skills/*/; do

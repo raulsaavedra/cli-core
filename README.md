@@ -135,7 +135,7 @@ Environment contracts:
 `scripts/install-binary.sh` is sourced by each CLI's `install.sh`.
 
 - `install_binary <src> <dest>` — copy a release binary into place, strip the quarantine attribute, and ad-hoc codesign it on macOS
-- `install_cli_skills <repo-root>` — symlink every `skills/*/` directory containing a `SKILL.md` into `~/.claude/skills`, overriding the destination with `CLAUDE_SKILLS_DIR`
+- `install_cli_skills <repo-root>` — symlink every `skills/*/` directory containing a `SKILL.md` into `~/.agents/skills`, overriding the destination with `AGENTS_SKILLS_DIR`
 
 Skills are symlinked rather than copied so the repository stays the only copy.
 
