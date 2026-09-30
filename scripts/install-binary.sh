@@ -15,19 +15,25 @@ install_cli_skills() {
   done
 }
 
+# Install a binary by renaming a prepared copy over the destination, so processes still
+# running the previous binary keep a valid code signature.
 install_binary() {
   local src="$1"
   local dest="$2"
+  local staged
 
   mkdir -p "$(dirname "$dest")"
-  cp "$src" "$dest"
-  chmod 0755 "$dest"
+  staged="$(mktemp "${dest}.XXXXXX")"
+  cp "$src" "$staged"
+  chmod 0755 "$staged"
 
   if command -v xattr >/dev/null 2>&1; then
-    xattr -d com.apple.quarantine "$dest" 2>/dev/null || true
+    xattr -d com.apple.quarantine "$staged" 2>/dev/null || true
   fi
 
   if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "$dest" >/dev/null 2>&1 || true
+    codesign --force --sign - "$staged" >/dev/null 2>&1 || true
   fi
+
+  mv -f "$staged" "$dest"
 }
