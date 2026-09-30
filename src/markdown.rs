@@ -1985,18 +1985,15 @@ fn try_parse_heading(line: &str) -> Option<(usize, String)> {
     Some((level, text))
 }
 
+/// Removes an ATX closing sequence: a run of `#` preceded by a space, or a heading of only `#`.
 fn strip_trailing_hashes(text: &str) -> String {
-    // Remove trailing ` #+` from the heading text.
     let trimmed = text.trim_end();
-    if let Some(idx) = trimmed.rfind(|c: char| c != '#' && c != ' ') {
-        let candidate = &trimmed[idx + 1..];
-        if candidate.contains('#') {
-            // Only strip if the # sequence is preceded by a space.
-            let pre = &trimmed[..=idx];
-            if pre.ends_with(' ') {
-                return pre.trim_end().to_string();
-            }
-        }
+    let content = trimmed.trim_end_matches('#');
+    if content.len() == trimmed.len() {
+        return text.to_string();
+    }
+    if content.is_empty() || content.ends_with(' ') {
+        return content.trim_end().to_string();
     }
     text.to_string()
 }
@@ -3427,6 +3424,26 @@ fn map_file_ref_occurrences(occurrences: &[FileRef], plain: &[String]) -> Vec<Fi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headings_keep_multibyte_text() {
+        assert_eq!(
+            try_parse_heading("## Qué se probó"),
+            Some((2, "Qué se probó".to_string()))
+        );
+        assert_eq!(
+            try_parse_heading("### Órdenes rechazadas ##"),
+            Some((3, "Órdenes rechazadas".to_string()))
+        );
+    }
+
+    #[test]
+    fn headings_strip_only_a_closing_hash_sequence() {
+        assert_eq!(try_parse_heading("# Title ##"), Some((1, "Title".to_string())));
+        assert_eq!(try_parse_heading("# Title ##  "), Some((1, "Title".to_string())));
+        assert_eq!(try_parse_heading("# C#"), Some((1, "C#".to_string())));
+        assert_eq!(try_parse_heading("# ###"), Some((1, String::new())));
+    }
 
     #[test]
     fn nested_lists_preserve_hierarchy_and_marker_type() {
