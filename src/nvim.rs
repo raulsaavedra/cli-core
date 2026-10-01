@@ -292,20 +292,20 @@ mod tests {
 
     #[test]
     fn handoff_serializes_source_action_cwd_targets_and_context() {
-        let handoff = NvimHandoff::new("diff", "edit")
+        let handoff = NvimHandoff::new("mdv", "file")
             .cwd("/repo")
             .target(NvimTarget::file("/repo/src/main.rs").line(42).label("main"))
-            .context("issue_token", "AUTH-12");
+            .context("selected_file", "/repo/src/main.rs");
 
         let json = serde_json::to_value(&handoff).unwrap();
 
         assert_eq!(json["version"], 1);
-        assert_eq!(json["source"], "diff");
-        assert_eq!(json["action"], "edit");
+        assert_eq!(json["source"], "mdv");
+        assert_eq!(json["action"], "file");
         assert_eq!(json["cwd"], "/repo");
         assert_eq!(json["targets"][0]["path"], "/repo/src/main.rs");
         assert_eq!(json["targets"][0]["line"], 42);
-        assert_eq!(json["context"]["issue_token"], "AUTH-12");
+        assert_eq!(json["context"]["selected_file"], "/repo/src/main.rs");
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
 
     #[test]
     fn argv_target_is_first_file_for_edit_action() {
-        let handoff = NvimHandoff::new("diff", "edit")
+        let handoff = NvimHandoff::new("mdv", "file")
             .cwd("/repo")
             .target(NvimTarget::file("src/main.rs").line(7));
         let target = handoff_argv_target(&handoff).expect("file target");
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn argv_target_skips_explore_action() {
-        let handoff = NvimHandoff::new("diff", "explore")
+        let handoff = NvimHandoff::new("w", "explore")
             .target(NvimTarget::directory("/repo"))
             .target(NvimTarget::file("/repo/src/main.rs"));
         assert!(handoff_argv_target(&handoff).is_none());
@@ -409,8 +409,7 @@ mod tests {
 
     #[test]
     fn argv_target_skips_directory_first_target() {
-        let handoff =
-            NvimHandoff::new("tickets", "worktree").target(NvimTarget::directory("/repo"));
+        let handoff = NvimHandoff::new("mdv", "worktree").target(NvimTarget::directory("/repo"));
         assert!(handoff_argv_target(&handoff).is_none());
     }
 
