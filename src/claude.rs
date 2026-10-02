@@ -4,11 +4,13 @@
 //! process keeps `<config dir>/sessions/<pid>.json`, and every session appends
 //! to `<config dir>/projects/<slug>/<session id>.jsonl`, where the slug is the
 //! session's working directory with every non-alphanumeric character turned
-//! into `-`.
+//! into `-`. Subagents and workflow agents a session spawns write their own
+//! transcripts under `<slug>/<session id>/subagents/`, each recording its own
+//! working directory, with an optional `<agent>.meta.json` beside it.
 
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -236,19 +238,33 @@ pub struct ProjectActivity {
     pub transcript: PathBuf,
 }
 
-/// Activity of every transcript directory of every profile. The directory
+/// Activity of every working directory of every profile, from session and
+/// subagent transcripts alike, sorted by profile and directory. The directory
 /// comes from the transcripts rather than the slug, which cannot be reversed.
 pub fn project_activity(profiles: &[Profile]) -> Vec<ProjectActivity> {
-    profiles
-        .iter()
-        .flat_map(|profile| {
-            let dirs = fs::read_dir(profile.projects_dir())
+    let mut newest: BTreeMap<(String, PathBuf), ProjectActivity> = BTreeMap::new();
+    for profile in profiles {
+        let dirs = fs::read_dir(profile.projects_dir())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path());
+        for dir in dirs {
+            let found = directory_activity(&profile.name, &dir)
                 .into_iter()
-                .flatten()
-                .flatten();
-            dirs.filter_map(|dir| directory_activity(&profile.name, &dir.path()))
-        })
-        .collect()
+                .chain(subagent_activity(&profile.name, &dir));
+            for activity in found {
+                let key = (activity.profile.clone(), activity.cwd.clone());
+                if newest
+                    .get(&key)
+                    .is_none_or(|known| known.last_active_at < activity.last_active_at)
+                {
+                    newest.insert(key, activity);
+                }
+            }
+        }
+    }
+    newest.into_values().collect()
 }
 
 fn directory_activity(profile: &str, dir: &Path) -> Option<ProjectActivity> {
@@ -257,7 +273,7 @@ fn directory_activity(profile: &str, dir: &Path) -> Option<ProjectActivity> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
-        .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().ok()?, path)))
+        .filter_map(|path| Some((modified(&path)?, path)))
         .collect();
     transcripts.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
     let cwd = transcripts
@@ -270,6 +286,41 @@ fn directory_activity(profile: &str, dir: &Path) -> Option<ProjectActivity> {
         last_active_at,
         transcript,
     })
+}
+
+/// One entry per subagent transcript under `<dir>/<session id>/subagents/`,
+/// in the directory that subagent ran in.
+fn subagent_activity(profile: &str, dir: &Path) -> Vec<ProjectActivity> {
+    let mut transcripts = Vec::new();
+    for session_dir in fs::read_dir(dir).into_iter().flatten().flatten() {
+        jsonl_files(&session_dir.path().join("subagents"), &mut transcripts);
+    }
+    transcripts
+        .into_iter()
+        .filter_map(|transcript| {
+            Some(ProjectActivity {
+                profile: profile.to_string(),
+                cwd: transcript_cwd(&transcript)?,
+                last_active_at: modified(&transcript)?,
+                transcript,
+            })
+        })
+        .collect()
+}
+
+fn jsonl_files(dir: &Path, found: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            jsonl_files(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "jsonl") {
+            found.push(path);
+        }
+    }
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok()?.modified().ok()
 }
 
 fn transcript_cwd(path: &Path) -> Option<PathBuf> {
@@ -288,7 +339,33 @@ fn transcript_cwd(path: &Path) -> Option<PathBuf> {
 
 /// The title Claude Code shows for a session: the newest title the user set,
 /// else the newest one Claude generated, else the first prompt the user typed.
+/// A subagent transcript takes the description it was spawned with, else the
+/// title of the session that spawned it.
 pub fn session_title(transcript: &Path) -> Option<String> {
+    match spawning_transcript(transcript) {
+        Some(parent) => subagent_description(transcript).or_else(|| transcript_title(&parent)),
+        None => transcript_title(transcript),
+    }
+}
+
+/// `<slug>/<session id>.jsonl` for a transcript under
+/// `<slug>/<session id>/subagents/`.
+fn spawning_transcript(transcript: &Path) -> Option<PathBuf> {
+    let session_dir = transcript
+        .parent()?
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == "subagents"))?
+        .parent()?;
+    Some(session_dir.with_extension("jsonl"))
+}
+
+fn subagent_description(transcript: &Path) -> Option<String> {
+    let meta: Value =
+        serde_json::from_slice(&fs::read(transcript.with_extension("meta.json")).ok()?).ok()?;
+    non_empty(meta["description"].as_str())
+}
+
+fn transcript_title(transcript: &Path) -> Option<String> {
     let file = fs::File::open(transcript).ok()?;
     let mut custom_title = None;
     let mut ai_title = None;
@@ -403,13 +480,20 @@ pub(crate) mod fixture {
         lines: &[&str],
         modified: SystemTime,
     ) {
-        let dir = profile.projects_dir().join(super::project_slug(cwd));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{session}.jsonl"));
-        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+        let path = profile
+            .projects_dir()
+            .join(super::project_slug(cwd))
+            .join(format!("{session}.jsonl"));
+        jsonl(&path, lines, modified);
+    }
+
+    /// `lines` written to `path`, last modified at `modified`.
+    pub fn jsonl(path: &Path, lines: &[&str], modified: SystemTime) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
         fs::File::options()
             .write(true)
-            .open(&path)
+            .open(path)
             .unwrap()
             .set_modified(modified)
             .unwrap();
@@ -418,7 +502,7 @@ pub(crate) mod fixture {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture::{own_proc_start, profile, session_record, transcript};
+    use super::fixture::{jsonl, own_proc_start, profile, session_record, transcript};
     use super::*;
     use crate::worktrees::fixture::scratch;
 
@@ -526,6 +610,82 @@ mod tests {
                 transcript: dir.join("projects/-Users-r-Personal-Projects-food/b.jsonl"),
             }]
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subagent_transcripts_count_toward_their_own_directory() {
+        let dir = scratch("claude-subagents");
+        let profile = profile("personal", &dir);
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(1_790_000_000 + secs);
+        let session = dir.join("projects/-src-config/s1");
+        transcript(
+            &profile,
+            Path::new("/src/config"),
+            "s1",
+            &[
+                r#"{"type":"user","cwd":"/src/config","message":{"content":"ship it"}}"#,
+                r#"{"type":"ai-title","aiTitle":"Ship the units"}"#,
+            ],
+            at(10),
+        );
+        let in_parent_dir = session.join("subagents/agent-a1.jsonl");
+        jsonl(
+            &in_parent_dir,
+            &[r#"{"type":"user","cwd":"/src/config"}"#],
+            at(5),
+        );
+        let unit = session.join("subagents/workflows/wf_1/agent-a2.jsonl");
+        jsonl(
+            &unit,
+            &[r#"{"type":"user","cwd":"/src/worktrees/unit-a","message":{"content":"brief"}}"#],
+            at(30),
+        );
+        fs::write(
+            unit.with_extension("meta.json"),
+            r#"{"agentType":"pstack:poteto-agent","description":"Build unit a"}"#,
+        )
+        .unwrap();
+        let older_unit = session.join("subagents/workflows/wf_1/agent-a3.jsonl");
+        jsonl(
+            &older_unit,
+            &[r#"{"type":"user","cwd":"/src/worktrees/unit-a"}"#],
+            at(20),
+        );
+        let lane = session.join("subagents/agent-a4.jsonl");
+        jsonl(
+            &lane,
+            &[r#"{"type":"user","cwd":"/repo/.claude/worktrees/wf_1-2"}"#],
+            at(40),
+        );
+        jsonl(
+            &session.join("subagents/workflows/wf_1/journal.jsonl"),
+            &[r#"{"type":"launched"}"#],
+            at(50),
+        );
+
+        let activity = project_activity(&[profile]);
+
+        let entry = |cwd: &str, secs: u64, transcript: &Path| ProjectActivity {
+            profile: "personal".into(),
+            cwd: PathBuf::from(cwd),
+            last_active_at: at(secs),
+            transcript: transcript.to_path_buf(),
+        };
+        assert_eq!(
+            activity,
+            vec![
+                entry("/repo/.claude/worktrees/wf_1-2", 40, &lane),
+                entry(
+                    "/src/config",
+                    10,
+                    &dir.join("projects/-src-config/s1.jsonl")
+                ),
+                entry("/src/worktrees/unit-a", 30, &unit),
+            ]
+        );
+        assert_eq!(session_title(&unit).as_deref(), Some("Build unit a"));
+        assert_eq!(session_title(&lane).as_deref(), Some("Ship the units"));
         fs::remove_dir_all(dir).unwrap();
     }
 

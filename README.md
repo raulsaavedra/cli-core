@@ -147,10 +147,10 @@ Claude Code state across account profiles, read from each profile's config direc
 
 - `profiles() -> Vec<Profile>` — rows of `profiles.tsv` in `CLAUDE_PROFILE_ROOT`, or `~/src/config/claude`
 - `live_sessions(&[Profile]) -> io::Result<Vec<LiveSession>>` — `<config dir>/sessions/<pid>.json` records whose pid is alive and started at the recorded `procStart`, with busy or idle status, cwd, tmux pane, and transcript path
-- `project_activity(&[Profile]) -> Vec<ProjectActivity>` — per transcript directory `<config dir>/projects/<slug>/`, the working directory and the newest transcript's modification time
-- `session_title(&Path) -> Option<String>` — the newest custom title, else the newest AI title, else the first typed prompt
+- `project_activity(&[Profile]) -> Vec<ProjectActivity>` — per profile and working directory, the newest transcript and its modification time, sorted by profile and directory
+- `session_title(&Path) -> Option<String>` — the newest custom title, else the newest AI title, else the first typed prompt; for a subagent transcript, its spawn description, else the spawning session's title
 
-The slug is the working directory with every non-alphanumeric character turned into `-`. It cannot be reversed, so `project_activity` reads the directory from the transcripts.
+Sessions write transcripts to `<config dir>/projects/<slug>/<session id>.jsonl`, where the slug is the working directory with every non-alphanumeric character turned into `-`. The slug cannot be reversed, so `project_activity` reads the directory from the transcripts. Subagents and workflow agents write theirs under `<slug>/<session id>/subagents/`, each with its own working directory, so a worktree only subagents touched still shows activity. A subagent's description comes from the `<agent>.meta.json` beside its transcript.
 
 ### `activity`
 
