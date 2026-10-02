@@ -15,6 +15,9 @@ Current modules (under `src/`):
 - `stdio`: stdin helpers (`read_stdin`)
 - `markdown`: terminal Markdown rendering and metadata extraction (`render`, `Heading`, `Link`, `RenderResult`)
 - `nvim`: structured Neovim handoff helpers (`NvimHandoff`, `NvimTarget`, `launch_handoff`, `NvimQuitCwd`)
+- `worktrees`: git worktrees under a root or containing given paths (`discover`, `containing`, `Worktree`)
+- `claude`: Claude Code profiles, live sessions, transcript activity, and titles (`profiles`, `live_sessions`, `project_activity`, `session_title`)
+- `activity`: worktrees joined with their agents and ranked (`discover`, `Scope`, `WorktreeEntry`, `Agent`, `Live`)
 
 Non-goals:
 - No app-specific command definitions or business logic

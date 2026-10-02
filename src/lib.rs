@@ -1,10 +1,13 @@
+pub mod activity;
 pub mod ansi;
+pub mod claude;
 pub mod diagram;
 pub mod markdown;
 pub mod nvim;
 pub mod output;
 pub mod sqlite;
 pub mod stdio;
+pub mod worktrees;
 
 pub use ansi::{parse_line, parse_lines};
 pub use markdown::{render, render_with_viewport, Heading, Link, RenderResult};

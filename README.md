@@ -11,6 +11,9 @@ Shared Rust crate for building local and agent-friendly CLIs.
 - `diagram` — render architecture and flow diagrams from `sketch` JSON fenced blocks
 - `ansi` — parse ANSI-styled strings into ratatui `Span` objects for TUI rendering
 - `nvim` — launch Neovim with structured handoff payloads and detect quit-to-terminal cwd handoff requests
+- `worktrees` — discover git repositories and their worktrees under a directory
+- `claude` — read Claude Code profiles, live sessions, transcript activity, and session titles
+- `activity` — join worktrees with the agents working in them, most active first
 
 The crate is best thought of as an opinionated utility library for local-first CLIs, not a full CLI framework.
 
@@ -130,6 +133,36 @@ Environment contracts:
 - `NVIM_HANDOFF` points Neovim at the structured JSON handoff file.
 - `NVIM_QUIT_CWD_FILE` points Neovim at a writable file. A Neovim quit-to-terminal action writes the target cwd into that file; the parent CLI can then exit instead of restoring its TUI, and a shell wrapper can `cd` to the written directory.
 
+### `worktrees`
+
+Git worktrees on disk. A repository is identified by its common git directory, so a linked worktree sitting next to its main checkout is not counted as a second repository. Bare entries and worktrees whose directory is gone are left out.
+
+- `discover(root: &Path) -> io::Result<Vec<Worktree>>` — every worktree of every repository at `root` or one of its direct child directories
+- `containing(paths: &[PathBuf]) -> io::Result<Vec<Worktree>>` — the worktrees whose checkouts contain the given paths
+- `Worktree` — `repo`, `path`, `branch` (`None` when detached), `is_main`, `dirty`, `last_commit_at`
+
+### `claude`
+
+Claude Code state across account profiles, read from each profile's config directory.
+
+- `profiles() -> Vec<Profile>` — rows of `profiles.tsv` in `CLAUDE_PROFILE_ROOT`, or `~/src/config/claude`
+- `live_sessions(&[Profile]) -> io::Result<Vec<LiveSession>>` — `<config dir>/sessions/<pid>.json` records whose pid is alive and started at the recorded `procStart`, with busy or idle status, cwd, tmux pane, and transcript path
+- `project_activity(&[Profile]) -> Vec<ProjectActivity>` — per transcript directory `<config dir>/projects/<slug>/`, the working directory and the newest transcript's modification time
+- `session_title(&Path) -> Option<String>` — the newest custom title, else the newest AI title, else the first typed prompt
+
+The slug is the working directory with every non-alphanumeric character turned into `-`. It cannot be reversed, so `project_activity` reads the directory from the transcripts.
+
+### `activity`
+
+Worktrees joined with their agents. A session belongs to the deepest worktree containing its working directory.
+
+- `discover(&Scope) -> io::Result<Vec<WorktreeEntry>>` — live sessions first, then by the later of last agent activity and last commit, then by repository and path
+- `Scope::Root(PathBuf)` — every worktree that `worktrees::discover` finds at the root
+- `Scope::RecentAgents(Duration)` — every worktree with a live session, or agent activity within the window, in any profile
+- `WorktreeEntry { worktree, agent }`, where `Agent` holds `live` (`Working`, `Idle`, `None`), `profile`, `title`, and `last_active_at`
+
+`cargo run --example activity -- ~/src` prints the top entries for a root, and `-- --recent 7` for the last week.
+
 ## Install scripts
 
 `scripts/install-binary.sh` is sourced by each CLI's `install.sh`.
@@ -158,6 +191,7 @@ Included:
 - shared install-script helpers for binaries and skills
 - ANSI-to-ratatui conversion for TUI consumers
 - Neovim handoff helpers for local CLI/TUI workflows
+- discovery of git worktrees and the local Claude Code agents working in them
 
 Not included:
 
