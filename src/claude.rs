@@ -108,6 +108,8 @@ pub struct LiveSession {
     pub status_changed_at: Option<SystemTime>,
     /// tmux pane id such as `%12`, when the session runs inside tmux.
     pub tmux_pane: Option<String>,
+    /// The name other sessions use to message this one.
+    pub name: Option<String>,
     /// Where the session's transcript lives once it has written one.
     pub transcript: PathBuf,
 }
@@ -122,6 +124,7 @@ struct SessionRecord {
     tmux: Option<String>,
     status: Option<String>,
     status_updated_at: Option<u64>,
+    name: Option<String>,
 }
 
 /// Live sessions of every profile. A record counts only while its process is
@@ -164,6 +167,7 @@ pub fn live_sessions(profiles: &[Profile]) -> io::Result<Vec<LiveSession>> {
                 },
                 status_changed_at: record.status_updated_at.map(from_millis),
                 tmux_pane: record.tmux.as_deref().and_then(pane_from_tmux_field),
+                name: record.name,
             }
         })
         .collect())
@@ -464,6 +468,7 @@ pub(crate) mod fixture {
             "tmux": "main:@4.%7",
             "status": status,
             "statusUpdatedAt": 1_790_268_373_805_u64,
+            "name": format!("main-{pid}"),
         });
         fs::write(
             profile.sessions_dir().join(format!("{pid}.json")),
@@ -557,6 +562,7 @@ mod tests {
                 status: SessionStatus::Busy,
                 status_changed_at: Some(UNIX_EPOCH + Duration::from_millis(1_790_268_373_805)),
                 tmux_pane: Some("%7".into()),
+                name: Some(format!("main-{pid}")),
                 transcript: dir.join(format!("projects/-work-my-repo/s-{pid}.jsonl")),
             }]
         );

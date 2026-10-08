@@ -201,6 +201,7 @@ mod tests {
             status,
             status_changed_at: None,
             tmux_pane: None,
+            name: None,
             transcript: PathBuf::from("/missing.jsonl"),
         }
     }
