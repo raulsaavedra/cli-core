@@ -7,7 +7,7 @@ Shared Rust crate for building local and agent-friendly CLIs.
 - `output` — JSON and human-readable terminal output
 - `sqlite` — open local SQLite databases with sensible defaults for CLI workloads
 - `stdio` — read piped stdin content
-- `markdown` — render Markdown in the terminal and extract plain-text metadata
+- `markdown` — render Markdown to ratatui lines in a themed palette, with its headings, links, and file references
 - `ansi` — parse ANSI-styled strings into ratatui `Span` objects for TUI rendering
 - `nvim` — launch Neovim with structured handoff payloads and detect quit-to-terminal cwd handoff requests
 - `worktrees` — discover git repositories and their worktrees under a directory
@@ -32,7 +32,7 @@ Each module except `stdio` sits behind a Cargo feature of the same name, and no 
 | `activity` | `claude` and `worktrees` |
 | `ansi` | ratatui |
 | `claude` | dirs, serde, serde_json |
-| `markdown` | ratatui, syntect, unicode-width |
+| `markdown` | pulldown-cmark, ratatui, syntect, unicode-width |
 | `nvim` | serde, serde_json |
 | `output` | serde, serde_json |
 | `sqlite` | dirs, rusqlite (bundled) |
@@ -100,21 +100,19 @@ Simple stdin helper for CLIs that accept piped or redirected input.
 
 ### `markdown`
 
-Terminal Markdown rendering with extracted metadata for downstream navigation and indexing.
+Terminal Markdown rendered straight to ratatui lines. mdv and cockpit's desk both draw through it, so they share one look.
 
-- `render(content: &str, width: usize) -> RenderResult`
+- `render(source: &str, width: usize, theme: &Theme) -> Rendered`
+- `Theme` holds one color per job: `prose`, `strong` (bold text), `heading` (`#` and `##` headings and list markers), `subheading` (`###` headings and table headers), `minor` (deeper headings), `code`, `link`, `quote`, `faint` (quote bars), and `border` (rules and table frames). `Theme::default()` is the desk's palette.
+- `Rendered` holds `lines`, `headings` (level, text, and the line it renders on), `links` with `link_occurrences`, and `file_refs` with `file_ref_occurrences`. Each occurrence records the line and the start and end display columns where it renders. `plain()` returns the lines as text.
 
-`RenderResult` fields:
+It draws `#` and `##` headings with a rule to the edge, wrapped paragraphs, nested, ordered, and task lists, quotes behind a faint bar, boxed tables whose cells wrap, and rules. Fenced code is highlighted with syntect and the bundled night-owl theme (`assets/night-owl.tmTheme`); a fence without a language, or with one syntect does not know, takes the code color. A line wider than the width ends in `…`.
 
-- `rendered: String` — ANSI-styled output joined by newlines
-- `lines: Vec<String>` — individual rendered lines (may contain ANSI codes)
-- `plain: Vec<String>` — plain-text lines with ANSI stripped and trailing spaces trimmed
-- `headings: Vec<Heading>` — heading metadata with `level`, `text`, and zero-based `line` index
-- `links: Vec<Link>` — extracted links with `text` and `href`
+A file reference is inline code holding a full path that starts with `/` or `~/` and ends in a file extension, optionally followed by `#symbol` or `:line`, such as `` `~/src/app/create.ts#createOrder` ``, or a link to a `file://` URL with an optional `#L12` or `#symbol` anchor. `FileRef::target_line()` returns the line to open, reading the file to find a symbol's definition with `definition_line`. A bare `http://` or `https://` URL counts as a link and keeps the prose color.
 
 ### `ansi`
 
-Bridge between the markdown renderer's ANSI output and ratatui's styled text model. Ratatui does not interpret raw ANSI escape codes; this module parses them into `Span` objects.
+Bridge between ANSI-styled strings, such as diff output, and ratatui's styled text model. Ratatui does not interpret raw ANSI escape codes; this module parses them into `Span` objects.
 
 - `parse_line(s: &str) -> Line<'static>` — parse a single ANSI-styled string into a ratatui `Line`
 - `parse_lines(lines: &[String]) -> Vec<Line<'static>>` — parse multiple lines at once
@@ -194,6 +192,7 @@ Included:
 - terminal rendering utilities
 - shared install-script helpers for binaries and skills
 - ANSI-to-ratatui conversion for TUI consumers
+- the one terminal Markdown renderer for TUI consumers
 - Neovim handoff helpers for local CLI/TUI workflows
 - discovery of git worktrees and the local Claude Code agents working in them
 

@@ -10,7 +10,7 @@ pub mod markdown;
 pub mod nvim;
 #[cfg(feature = "output")]
 pub mod output;
-#[cfg(test)]
+#[cfg(all(test, any(feature = "claude", feature = "worktrees")))]
 mod scratch;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -20,8 +20,6 @@ pub mod worktrees;
 
 #[cfg(feature = "ansi")]
 pub use ansi::{parse_line, parse_lines};
-#[cfg(feature = "markdown")]
-pub use markdown::{render, render_with_viewport, Heading, Link, RenderResult};
 #[cfg(feature = "nvim")]
 pub use nvim::{
     editor_is_neovim, launch_handoff, quit_to_terminal_requested, write_handoff_file, NvimHandoff,
