@@ -18,12 +18,25 @@ The crate is best thought of as an opinionated utility library for local-first C
 
 ## Usage
 
-Add `cli-core` as a path dependency in your `Cargo.toml`:
+Add `cli-core` as a path dependency in your `Cargo.toml` and name the modules you use as features:
 
 ```toml
 [dependencies]
-cli-core = { path = "../packages/cli-core" }
+cli-core = { path = "../packages/cli-core", features = ["markdown", "nvim"] }
 ```
+
+Each module except `stdio` sits behind a Cargo feature of the same name, and no feature is on by default, so a CLI compiles only the modules and dependencies it names:
+
+| Feature | Pulls in |
+|---|---|
+| `activity` | `claude` and `worktrees` |
+| `ansi` | ratatui |
+| `claude` | dirs, serde, serde_json |
+| `markdown` | ratatui, syntect, unicode-width |
+| `nvim` | serde, serde_json |
+| `output` | serde, serde_json |
+| `sqlite` | dirs, rusqlite (bundled) |
+| `worktrees` | nothing beyond std |
 
 ## Modules
 
@@ -165,8 +178,9 @@ Skills are symlinked rather than copied so the repository stays the only copy.
 ## Development
 
 ```bash
-cargo build
-cargo test
+cargo build --all-features
+cargo test --all-features
+cargo clippy --all-features --all-targets
 ```
 
 ## Scope

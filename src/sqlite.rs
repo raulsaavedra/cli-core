@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 
+pub type Migration = fn(&Connection) -> Result<(), String>;
+
 /// Options for opening a SQLite database.
 pub struct OpenOptions {
     /// Application name (used to derive the default path as `~/.{app_name}/`).
@@ -15,7 +17,7 @@ pub struct OpenOptions {
     /// Extra pragmas — override defaults by key (e.g. "busy_timeout = 5000").
     pub pragmas: Vec<String>,
     /// Optional migration callback run after opening & pragma setup.
-    pub migrate: Option<fn(&Connection) -> Result<(), String>>,
+    pub migrate: Option<Migration>,
 }
 
 const DEFAULT_PRAGMAS: &[&str] = &[

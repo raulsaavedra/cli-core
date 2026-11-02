@@ -107,31 +107,10 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
             35 => style = style.fg(Color::Magenta),
             36 => style = style.fg(Color::Cyan),
             37 => style = style.fg(Color::White),
-            // Extended foreground: 38;5;n (256-color) or 38;2;r;g;b (truecolor)
             38 => {
-                if i + 1 < codes.len() {
-                    match codes[i + 1] {
-                        5 => {
-                            // 256-color: 38;5;n
-                            if i + 2 < codes.len() {
-                                style = style.fg(Color::Indexed(codes[i + 2] as u8));
-                                i += 2;
-                            }
-                        }
-                        2 => {
-                            // Truecolor: 38;2;r;g;b
-                            if i + 4 < codes.len() {
-                                style = style.fg(Color::Rgb(
-                                    codes[i + 2] as u8,
-                                    codes[i + 3] as u8,
-                                    codes[i + 4] as u8,
-                                ));
-                                i += 4;
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
+                if let Some((color, used)) = extended_color(&codes[i + 1..]) {
+                    style = style.fg(color);
+                    i += used;
                 }
             }
             39 => style = style.fg(Color::Reset),
@@ -144,29 +123,10 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
             45 => style = style.bg(Color::Magenta),
             46 => style = style.bg(Color::Cyan),
             47 => style = style.bg(Color::White),
-            // Extended background: 48;5;n or 48;2;r;g;b
             48 => {
-                if i + 1 < codes.len() {
-                    match codes[i + 1] {
-                        5 => {
-                            if i + 2 < codes.len() {
-                                style = style.bg(Color::Indexed(codes[i + 2] as u8));
-                                i += 2;
-                            }
-                        }
-                        2 => {
-                            if i + 4 < codes.len() {
-                                style = style.bg(Color::Rgb(
-                                    codes[i + 2] as u8,
-                                    codes[i + 3] as u8,
-                                    codes[i + 4] as u8,
-                                ));
-                                i += 4;
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
+                if let Some((color, used)) = extended_color(&codes[i + 1..]) {
+                    style = style.bg(color);
+                    i += used;
                 }
             }
             49 => style = style.bg(Color::Reset),
@@ -185,4 +145,12 @@ fn apply_sgr(params: &str, mut style: Style) -> Style {
     }
 
     style
+}
+
+fn extended_color(codes: &[u16]) -> Option<(Color, usize)> {
+    match codes {
+        [5, index, ..] => Some((Color::Indexed(*index as u8), 2)),
+        [2, red, green, blue, ..] => Some((Color::Rgb(*red as u8, *green as u8, *blue as u8), 4)),
+        _ => None,
+    }
 }

@@ -173,7 +173,8 @@ fn recency(entry: &WorktreeEntry) -> Option<SystemTime> {
 mod tests {
     use super::*;
     use crate::claude::fixture::{own_proc_start, profile, session_record, transcript};
-    use crate::worktrees::fixture::{git, repo, scratch};
+    use crate::scratch::scratch;
+    use crate::worktrees::fixture::{git, repo};
     use std::fs;
     use std::time::UNIX_EPOCH;
 

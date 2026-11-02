@@ -509,7 +509,7 @@ pub(crate) mod fixture {
 mod tests {
     use super::fixture::{jsonl, own_proc_start, profile, session_record, transcript};
     use super::*;
-    use crate::worktrees::fixture::scratch;
+    use crate::scratch::scratch;
 
     #[test]
     fn profile_table_expands_home_and_skips_comments() {

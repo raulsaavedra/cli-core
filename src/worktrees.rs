@@ -240,22 +240,8 @@ fn try_par_map<T: Sync, R: Send>(
 #[cfg(test)]
 pub(crate) mod fixture {
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// A fresh, canonical scratch directory for one test.
-    pub fn scratch(label: &str) -> PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "cli-core-{label}-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        fs::canonicalize(dir).unwrap()
-    }
 
     /// Runs git in `dir` without the user's global or system config.
     pub fn git(dir: &Path, args: &[&str]) {
@@ -292,7 +278,8 @@ pub(crate) mod fixture {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture::{git, repo, scratch};
+    use super::fixture::{git, repo};
+    use crate::scratch::scratch;
     use super::*;
 
     fn summary(

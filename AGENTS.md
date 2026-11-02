@@ -8,16 +8,21 @@ Scope:
 - App-agnostic helpers only.
 - Modules should be reusable across multiple CLIs without carrying domain rules.
 
-Current modules (under `src/`):
+Current modules (under `src/`), each behind a Cargo feature of the same name except `stdio`:
 - `output`: terminal and JSON output helpers (`json`, `success`, `errorf`)
-- `skills`: install skill directories into an agent skills root (`resolve_skills_dir`, `install`)
 - `sqlite`: file-backed SQLite opening and bootstrap helpers via rusqlite (`open_sqlite`, `apply_pragmas`, `db_path`, `ensure_dir_for_file`)
-- `stdio`: stdin helpers (`read_stdin`)
+- `stdio`: stdin helpers (`read_stdin`), always compiled
+- `ansi`: ANSI-styled strings parsed into ratatui lines (`parse_line`, `parse_lines`)
 - `markdown`: terminal Markdown rendering and metadata extraction (`render`, `Heading`, `Link`, `RenderResult`)
 - `nvim`: structured Neovim handoff helpers (`NvimHandoff`, `NvimTarget`, `launch_handoff`, `NvimQuitCwd`)
 - `worktrees`: git worktrees under a root or containing given paths (`discover`, `containing`, `Worktree`)
 - `claude`: Claude Code profiles, live sessions, transcript activity, and titles (`profiles`, `live_sessions`, `project_activity`, `session_title`)
-- `activity`: worktrees joined with their agents and ranked (`discover`, `Scope`, `WorktreeEntry`, `Agent`, `Live`)
+- `activity`: worktrees joined with their agents and ranked (`discover`, `Scope`, `WorktreeEntry`, `Agent`, `Live`); its feature turns on `claude` and `worktrees`
+
+Features:
+- No feature is on by default. Each consumer names the modules it uses in its `Cargo.toml`, so it compiles only those modules and their dependencies.
+- A new module gets a feature named after it that turns on exactly the optional dependencies it needs, gated in `src/lib.rs`.
+- Test fixtures shared across modules live in `src/scratch.rs`, compiled only for tests, so each feature's tests build alone.
 
 Non-goals:
 - No app-specific command definitions or business logic
@@ -39,10 +44,11 @@ Error policy:
 - Functions signal failure via `Result` or `io::Result`
 
 Build:
-- `cargo build` to compile
-- `cargo test` to run tests (when added)
+- `cargo build --all-features` to compile every module
+- `cargo test --all-features` to run tests; `cargo test --features <name>` checks one module alone
+- `cargo clippy --all-features --all-targets` for lints
 
 Dependency policy:
 - Keep dependencies minimal
 - Prefer Rust std library unless a dependency clearly earns its keep
-- Key deps: rusqlite (bundled), serde/serde_json, crossterm, dirs, unicode-width
+- Every dependency is optional and belongs to the features that need it: rusqlite (bundled), serde/serde_json, dirs, ratatui, syntect, unicode-width
