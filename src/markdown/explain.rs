@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ratatui::style::{Modifier, Style};
 use serde::Deserialize;
@@ -31,30 +32,117 @@ pub(super) struct Drawn {
 }
 
 pub(super) type Drawing = Vec<Vec<Drawn>>;
-type Cache = Mutex<HashMap<(String, String, usize), Option<Drawing>>>;
+type Key = (String, String, usize);
 
-pub(super) fn draw(kind: &str, source: &str, width: usize) -> Option<Drawing> {
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    let cache = CACHE.get_or_init(Default::default);
-    let key = (kind.to_string(), source.to_string(), width);
-    if let Some(found) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
-        return found;
-    }
-    let drawing = run(kind, source, width);
-    if let Ok(mut cache) = cache.lock() {
-        if cache.len() >= CACHE_LIMIT {
-            cache.clear();
-        }
-        cache.insert(key, drawing.clone());
-    }
-    drawing
+struct Entry {
+    drawing: Option<Drawing>,
+    stamps: Vec<(PathBuf, Option<SystemTime>)>,
 }
 
-pub(super) fn prefetch(requests: Vec<(String, String, usize)>) {
-    if requests.len() < 2 {
+impl Entry {
+    fn fresh(&self) -> bool {
+        self.stamps.iter().all(|(path, stamp)| modified(path) == *stamp)
+    }
+}
+
+#[derive(Default)]
+pub(super) struct Drawings {
+    entries: Mutex<HashMap<Key, Entry>>,
+}
+
+impl Drawings {
+    pub fn draw(&self, kind: &str, source: &str, width: usize, run: impl Fn(&str, &str, usize) -> Option<Drawing>) -> Option<Drawing> {
+        let key = (kind.to_string(), source.to_string(), width);
+        if let Some(found) = self.fresh(&key) {
+            return found;
+        }
+        let stamps = read_files(kind, source)
+            .into_iter()
+            .map(|path| {
+                let stamp = modified(&path);
+                (path, stamp)
+            })
+            .collect();
+        let drawing = run(kind, source, width);
+        if let Ok(mut entries) = self.entries.lock() {
+            if entries.len() >= CACHE_LIMIT {
+                entries.clear();
+            }
+            entries.insert(
+                key,
+                Entry {
+                    drawing: drawing.clone(),
+                    stamps,
+                },
+            );
+        }
+        drawing
+    }
+
+    fn fresh(&self, key: &Key) -> Option<Option<Drawing>> {
+        let entries = self.entries.lock().ok()?;
+        let entry = entries.get(key)?;
+        entry.fresh().then(|| entry.drawing.clone())
+    }
+
+    pub fn missing(&self, requests: Vec<Key>) -> Vec<Key> {
+        requests
+            .into_iter()
+            .filter(|key| self.fresh(key).is_none())
+            .collect()
+    }
+}
+
+fn drawings() -> &'static Drawings {
+    static DRAWINGS: OnceLock<Drawings> = OnceLock::new();
+    DRAWINGS.get_or_init(Drawings::default)
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
+}
+
+fn read_files(kind: &str, source: &str) -> Vec<PathBuf> {
+    if kind != "code" {
+        return Vec::new();
+    }
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for line in source.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let note = line
+            .split_once(':')
+            .is_some_and(|(number, _)| !number.is_empty() && number.trim().chars().all(|character| character.is_ascii_digit()));
+        if note || line.starts_with('"') {
+            continue;
+        }
+        let target = match line.rsplit_once(" @") {
+            Some((target, reference)) if !reference.contains(char::is_whitespace) => target.trim_end(),
+            _ => line,
+        };
+        let end = target.find(['#', ':']).unwrap_or(target.len());
+        let path = FileRef {
+            path: target[..end].to_string(),
+            line: None,
+            symbol: None,
+            label: None,
+        }
+        .resolved_path();
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+pub(super) fn draw(kind: &str, source: &str, width: usize) -> Option<Drawing> {
+    drawings().draw(kind, source, width, run)
+}
+
+pub(super) fn prefetch(requests: Vec<Key>) {
+    let missing = drawings().missing(requests);
+    if missing.len() < 2 {
         return;
     }
-    let handles: Vec<_> = requests
+    let handles: Vec<_> = missing
         .into_iter()
         .map(|(kind, source, width)| thread::spawn(move || draw(&kind, &source, width)))
         .collect();

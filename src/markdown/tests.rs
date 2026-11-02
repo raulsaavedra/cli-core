@@ -419,3 +419,102 @@ mod diagrams {
         assert_eq!(places, [("/repo/b.rs", Some(1), 0, 4, 16), ("/repo/a.rs", Some(3), 3, 2, 8)]);
     }
 }
+
+mod excerpts {
+    use std::cell::Cell;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, SystemTime};
+
+    use super::super::explain::{Drawing, Drawings, Drawn};
+    use super::super::{render_with, Theme};
+
+    fn scratch(label: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!("cli-core-{label}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    fn rewrite(file: &Path, text: &str, seconds_later: u64) {
+        fs::write(file, text).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(file)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(seconds_later))
+            .unwrap();
+    }
+
+    fn lines_of(source: &str) -> Option<Drawing> {
+        let first = source.lines().next()?;
+        let path = &first[..first.find(['#', ':']).unwrap_or(first.len())];
+        let text = fs::read_to_string(path).ok()?;
+        Some(
+            text.lines()
+                .map(|line| {
+                    vec![Drawn {
+                        text: line.to_string(),
+                        tone: "code".into(),
+                        language: None,
+                        room: None,
+                        href: None,
+                    }]
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_code_fence_shows_its_file_as_it_is_now() {
+        let directory = scratch("excerpt-edit");
+        let file = directory.join("create.ts");
+        rewrite(&file, "const a = 1\nconst b = 2\n", 0);
+        let drawings = Drawings::default();
+        let runs = Cell::new(0);
+        let read = |_: &str, source: &str, _: usize| {
+            runs.set(runs.get() + 1);
+            lines_of(source)
+        };
+        let draw = |kind: &str, source: &str, width: usize| drawings.draw(kind, source, width, read);
+        let fence = format!("```code\n{}:1-2\n```\n", file.display());
+        let theme = Theme::default();
+        assert_eq!(render_with(&fence, 40, &theme, &draw).plain(), ["const a = 1", "const b = 2"]);
+        assert_eq!(render_with(&fence, 40, &theme, &draw).plain(), ["const a = 1", "const b = 2"]);
+        assert_eq!(runs.get(), 1);
+        rewrite(&file, "const a = 10\nconst b = 20\n", 5);
+        assert_eq!(render_with(&fence, 40, &theme, &draw).plain(), ["const a = 10", "const b = 20"]);
+        assert_eq!(runs.get(), 2);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_code_fence_for_a_missing_file_draws_once_the_file_appears() {
+        let directory = scratch("excerpt-missing");
+        let file = directory.join("later.rs");
+        let drawings = Drawings::default();
+        let draw = |kind: &str, source: &str, width: usize| drawings.draw(kind, source, width, |_: &str, source: &str, _: usize| lines_of(source));
+        let fence = format!("```code\n{}#later @origin/main\n\"x\": a note\n```\n", file.display());
+        let theme = Theme::default();
+        assert_eq!(render_with(&fence, 200, &theme, &draw).plain()[1], "  \"x\": a note");
+        rewrite(&file, "fn later() {}\n", 0);
+        assert_eq!(render_with(&fence, 200, &theme, &draw).plain(), ["fn later() {}"]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn diagrams_stay_cached_and_only_missing_keys_are_drawn() {
+        let drawings = Drawings::default();
+        let runs = Cell::new(0);
+        let draw = |_: &str, _: &str, _: usize| {
+            runs.set(runs.get() + 1);
+            Some(Vec::new())
+        };
+        drawings.draw("flow", "A -> B", 40, draw);
+        drawings.draw("flow", "A -> B", 40, draw);
+        assert_eq!(runs.get(), 1);
+        let cached = ("flow".to_string(), "A -> B".to_string(), 40);
+        let other = ("map".to_string(), "A -> B".to_string(), 40);
+        assert_eq!(drawings.missing(vec![cached, other.clone()]), vec![other]);
+    }
+}
