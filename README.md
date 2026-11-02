@@ -32,7 +32,7 @@ Each module except `stdio` sits behind a Cargo feature of the same name, and no 
 | `activity` | `claude` and `worktrees` |
 | `ansi` | ratatui |
 | `claude` | dirs, serde, serde_json |
-| `markdown` | pulldown-cmark, ratatui, syntect, unicode-width |
+| `markdown` | pulldown-cmark, ratatui, serde, serde_json, syntect, unicode-width |
 | `nvim` | serde, serde_json |
 | `output` | serde, serde_json |
 | `sqlite` | dirs, rusqlite (bundled) |
@@ -107,6 +107,8 @@ Terminal Markdown rendered straight to ratatui lines. mdv and cockpit's desk bot
 - `Rendered` holds `lines`, `headings` (level, text, and the line it renders on), `links` with `link_occurrences`, and `file_refs` with `file_ref_occurrences`. Each occurrence records the line and the start and end display columns where it renders. `plain()` returns the lines as text.
 
 It draws `#` and `##` headings with a rule to the edge, wrapped paragraphs, nested, ordered, and task lists, quotes behind a faint bar, boxed tables whose cells wrap, and rules. Fenced code is highlighted with syntect and the bundled night-owl theme (`assets/night-owl.tmTheme`); a fence without a language, or with one syntect does not know, takes the code color. A line wider than the width ends in `…`.
+
+Fences tagged `flow`, `map`, `states`, or `code` are drawn by `explain-render`, the command the explain mod in `~/src/config` ships and links into `~/.local/bin`. The renderer runs `explain-render <kind> <width>` with the block's source on stdin, reads back one array of `{text, tone}` pieces per line, maps each tone onto the `Theme`, and highlights a code excerpt's lines with syntect. Drawings are cached by kind, source, and width, and a document's blocks are drawn in parallel the first time it renders. When the command is missing, fails, runs past five seconds, or draws wider than the column, the fence shows as plain code. A code excerpt's header path is a file reference to the excerpt's first line.
 
 A file reference is inline code holding a full path that starts with `/` or `~/` and ends in a file extension, optionally followed by `#symbol` or `:line`, such as `` `~/src/app/create.ts#createOrder` ``, or a link to a `file://` URL with an optional `#L12` or `#symbol` anchor. `FileRef::target_line()` returns the line to open, reading the file to find a symbol's definition with `definition_line`. A bare `http://` or `https://` URL counts as a link and keeps the prose color.
 

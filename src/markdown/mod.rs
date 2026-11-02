@@ -1,4 +1,5 @@
 mod code;
+mod explain;
 mod layout;
 mod refs;
 mod theme;
@@ -69,10 +70,52 @@ impl Rendered {
     }
 }
 
+type Draw<'d> = &'d dyn Fn(&str, &str, usize) -> Option<explain::Drawing>;
+
 pub fn render(source: &str, width: usize, theme: &Theme) -> Rendered {
-    let mut writer = Writer::new(width.max(12), theme);
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    for event in Parser::new_ext(source, options) {
+    explain::prefetch(diagrams(source, width.max(12)));
+    render_with(source, width, theme, &explain::draw)
+}
+
+const OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS);
+
+fn diagrams(source: &str, width: usize) -> Vec<(String, String, usize)> {
+    let mut found = Vec::new();
+    let mut depth = 0usize;
+    let mut open: Option<(String, String)> = None;
+    for event in Parser::new_ext(source, OPTIONS) {
+        match event {
+            Event::Start(Tag::List(_)) => depth += 1,
+            Event::End(TagEnd::List(_)) => depth = depth.saturating_sub(1),
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                let kind = info.split_whitespace().next().unwrap_or_default();
+                open = explain::KINDS
+                    .contains(&kind)
+                    .then(|| (kind.to_string(), String::new()));
+            }
+            Event::Text(text) => {
+                if let Some((_, body)) = open.as_mut() {
+                    body.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((kind, body)) = open.take() {
+                    let indent = if depth == 0 { 0 } else { depth * 2 };
+                    let body = body.trim_end_matches('\n').to_string();
+                    found.push((kind, body, width.saturating_sub(indent)));
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+fn render_with(source: &str, width: usize, theme: &Theme, draw: Draw) -> Rendered {
+    let mut writer = Writer::new(width.max(12), theme, draw);
+    for event in Parser::new_ext(source, OPTIONS) {
         writer.event(event);
     }
     writer.finish()
@@ -96,6 +139,7 @@ struct OpenLink {
 
 struct Writer<'t> {
     theme: &'t Theme,
+    draw: Draw<'t>,
     room: usize,
     rows: Vec<Row>,
     spans: Vec<Piece>,
@@ -114,9 +158,10 @@ struct Writer<'t> {
 }
 
 impl<'t> Writer<'t> {
-    fn new(room: usize, theme: &'t Theme) -> Writer<'t> {
+    fn new(room: usize, theme: &'t Theme, draw: Draw<'t>) -> Writer<'t> {
         Writer {
             theme,
+            draw,
             room,
             rows: Vec::new(),
             spans: Vec::new(),
@@ -479,9 +524,14 @@ impl<'t> Writer<'t> {
 
     fn fence(&mut self, fence: &Fence) {
         let indent = self.indent();
-        let room = self.room.saturating_sub(indent + 2);
         let source = fence.source.trim_end_matches('\n');
-        let lines: Vec<Row> = match code::highlight(&fence.language, source) {
+        let drawn = explain::KINDS.contains(&fence.language.as_str());
+        if drawn && self.diagram(&fence.language, source, indent) {
+            return;
+        }
+        let room = self.room.saturating_sub(indent + 2);
+        let highlighted = if drawn { None } else { code::highlight(&fence.language, source) };
+        let lines: Vec<Row> = match highlighted {
             Some(tokens) => tokens
                 .into_iter()
                 .map(|line| line.into_iter().map(|(text, style)| Piece::new(text, style)).collect())
@@ -496,6 +546,32 @@ impl<'t> Writer<'t> {
             row.extend(fit_row(line, room));
             self.rows.push(row);
         }
+    }
+
+    fn diagram(&mut self, kind: &str, source: &str, indent: usize) -> bool {
+        let room = self.room.saturating_sub(indent);
+        let Some(drawing) = (self.draw)(kind, source, room) else {
+            return false;
+        };
+        let mut files = Vec::new();
+        let rows = explain::rows(drawing, self.theme, &mut files);
+        if rows.is_empty() || rows.iter().any(|row| row_width(row) > room) {
+            return false;
+        }
+        let offset = self.files.len();
+        self.files.extend(files);
+        for row in rows {
+            let mut line = vec![Piece::new(" ".repeat(indent), Style::default())];
+            line.extend(row.into_iter().map(|piece| Piece {
+                mark: piece.mark.map(|mark| match mark {
+                    Mark::File(index) => Mark::File(index + offset),
+                    other => other,
+                }),
+                ..piece
+            }));
+            self.rows.push(line);
+        }
+        true
     }
 
     fn table(&mut self, table: Table) {

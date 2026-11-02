@@ -315,3 +315,107 @@ fn repeated_file_references_keep_each_occurrence() {
 fn task_lists_show_their_boxes() {
     assert_eq!(plain("- [x] done\n- [ ] open\n", 30), vec!["☑ done", "☐ open"]);
 }
+
+mod diagrams {
+    use std::cell::RefCell;
+
+    use super::super::explain::{Drawing, Drawn};
+    use super::super::{diagrams, render_with, Theme};
+
+    #[test]
+    fn diagrams_are_found_with_the_room_their_fence_gets() {
+        let source = "```flow\nA -> B\n```\n\n- item\n\n  ```map\n  A -> B\n  ```\n\n```rust\nfn main() {}\n```\n";
+        assert_eq!(
+            diagrams(source, 40),
+            vec![
+                ("flow".to_string(), "A -> B".to_string(), 40),
+                ("map".to_string(), "A -> B".to_string(), 38),
+            ]
+        );
+    }
+
+    fn drawn(text: &str, tone: &str) -> Drawn {
+        Drawn {
+            text: text.to_string(),
+            tone: tone.to_string(),
+            language: None,
+            room: None,
+            href: None,
+        }
+    }
+
+    #[test]
+    fn explain_fences_draw_through_the_command_at_the_column_width() {
+        let asked = RefCell::new(Vec::new());
+        let draw = |kind: &str, source: &str, width: usize| -> Option<Drawing> {
+            asked.borrow_mut().push((kind.to_string(), source.to_string(), width));
+            Some(vec![vec![drawn("┌───┐", "lane")], vec![drawn("│ A │", "name")]])
+        };
+        let theme = Theme::default();
+        let result = render_with("Before.\n\n```flow\nA -> B: go\n```\n\nAfter.", 40, &theme, &draw);
+        assert_eq!(result.plain(), vec!["Before.", "", "┌───┐", "│ A │", "", "After."]);
+        assert_eq!(*asked.borrow(), vec![("flow".to_string(), "A -> B: go".to_string(), 40)]);
+        assert_eq!(result.lines[2].spans[1].style.fg, Some(theme.faint));
+        assert_eq!(result.lines[3].spans[1].style.fg, Some(theme.heading));
+    }
+
+    #[test]
+    fn a_failed_drawing_shows_the_fence_as_plain_code() {
+        let theme = Theme::default();
+        let result = render_with("```map\nA -> B\n```\n", 40, &theme, &|_: &str, _: &str, _: usize| None);
+        assert_eq!(result.plain(), vec!["  A -> B"]);
+        assert_eq!(result.lines[0].spans[1].style.fg, Some(theme.code));
+    }
+
+    #[test]
+    fn a_drawing_wider_than_the_column_shows_the_fence_as_plain_code() {
+        let draw = |_: &str, _: &str, _: usize| Some(vec![vec![drawn(&"─".repeat(41), "lane")]]);
+        let result = render_with("```states\na -> b\n```\n", 40, &Theme::default(), &draw);
+        assert_eq!(result.plain(), vec!["  a -> b"]);
+    }
+
+    #[test]
+    fn a_drawing_inside_a_list_takes_the_item_indent() {
+        let asked = RefCell::new(0);
+        let draw = |_: &str, _: &str, width: usize| {
+            *asked.borrow_mut() = width;
+            Some(vec![vec![drawn("box", "plain")]])
+        };
+        let result = render_with("- item\n\n  ```flow\n  A -> B\n  ```\n", 40, &Theme::default(), &draw);
+        assert_eq!(result.plain(), vec!["• item", "  box"]);
+        assert_eq!(*asked.borrow(), 38);
+    }
+
+    #[test]
+    fn an_excerpt_header_is_a_file_reference_where_it_renders() {
+        let draw = |_: &str, _: &str, _: usize| {
+            Some(vec![
+                vec![drawn("╭──────────╮", "border")],
+                vec![
+                    drawn("│ ", "border"),
+                    Drawn {
+                        href: Some("file:///repo/a.rs#L3".into()),
+                        ..drawn("a.rs:3", "link")
+                    },
+                    drawn("   ", "plain"),
+                    drawn(" │", "border"),
+                ],
+            ])
+        };
+        let result = render_with("See `/repo/b.rs:1`.\n\n```code\n/repo/a.rs:3\n```\n", 40, &Theme::default(), &draw);
+        let places: Vec<(&str, Option<usize>, usize, usize, usize)> = result
+            .file_ref_occurrences
+            .iter()
+            .map(|occurrence| {
+                (
+                    occurrence.file_ref.path.as_str(),
+                    occurrence.file_ref.line,
+                    occurrence.line,
+                    occurrence.start_col,
+                    occurrence.end_col,
+                )
+            })
+            .collect();
+        assert_eq!(places, [("/repo/b.rs", Some(1), 0, 4, 16), ("/repo/a.rs", Some(3), 3, 2, 8)]);
+    }
+}

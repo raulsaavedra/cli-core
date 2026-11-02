@@ -13,7 +13,7 @@ Current modules (under `src/`), each behind a Cargo feature of the same name exc
 - `sqlite`: file-backed SQLite opening and bootstrap helpers via rusqlite (`open_sqlite`, `apply_pragmas`, `db_path`, `ensure_dir_for_file`)
 - `stdio`: stdin helpers (`read_stdin`), always compiled
 - `ansi`: ANSI-styled strings parsed into ratatui lines (`parse_line`, `parse_lines`)
-- `markdown`: Markdown rendered to ratatui lines in a `Theme`, with headings, links, and file references (`render`, `Theme`, `Rendered`, `FileRef`, `definition_line`); split into `layout` (wrapping and fitting), `code` (syntect highlighting with the bundled night-owl theme), and `refs` (file references)
+- `markdown`: Markdown rendered to ratatui lines in a `Theme`, with headings, links, and file references (`render`, `Theme`, `Rendered`, `FileRef`, `definition_line`); split into `layout` (wrapping and fitting), `code` (syntect highlighting with the bundled night-owl theme), `refs` (file references), and `explain` (`flow`, `map`, `states`, and `code` fences drawn by the `explain-render` command)
 - `nvim`: structured Neovim handoff helpers (`NvimHandoff`, `NvimTarget`, `launch_handoff`, `NvimQuitCwd`)
 - `worktrees`: git worktrees under a root or containing given paths (`discover`, `containing`, `Worktree`)
 - `claude`: Claude Code profiles, live sessions, transcript activity, and titles (`profiles`, `live_sessions`, `project_activity`, `session_title`)
@@ -31,6 +31,7 @@ Non-goals:
 
 Markdown rendering:
 - `cli_core::markdown` is the one terminal Markdown renderer: mdv and cockpit's desk both call `render`, and the look is the desk's. A consumer changes colors only by passing a `Theme`.
+- Fences the explain mod draws go through `explain-render` on `PATH`; any failure, or a drawing wider than the column, falls back to the plain fence, so rendering never depends on the command being installed. Tests drive the writer through `render_with` and a fake drawer.
 - Metadata comes from the same pass that lays out the lines: every link and file reference piece carries a mark, and its occurrence is read from where the mark lands after wrapping, so columns stay exact in tables and wrapped lines.
 
 Neovim handoff contract:
