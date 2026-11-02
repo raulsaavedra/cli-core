@@ -2323,35 +2323,6 @@ fn render_blocks(blocks: &[Block], ctx: &mut RenderContext) -> Vec<String> {
                 if !out.is_empty() && !is_blank_line(out.last().unwrap()) {
                     out.push(String::new());
                 }
-                if lang == "sketch" {
-                    match crate::diagram::render_json_in(code, ctx.viewport_width) {
-                        Ok(rendered) if rendered.graph_width <= ctx.viewport_width => {
-                            out.extend(rendered.lines);
-                            out.push(String::new());
-                            continue;
-                        }
-                        Ok(rendered) => {
-                            // The graph itself is too wide for the viewport: an
-                            // honest placeholder beats a truncated diagram.
-                            // Footnotes wrap, so only the node/edge extent
-                            // (graph_width) can trip this — never a long note.
-                            let title = rendered.title.as_deref().unwrap_or("untitled");
-                            out.push(ansi_dim(&format!(
-                                "◆ sketch `{title}` — {} nodes, {} edges — needs {} cols (viewport {})",
-                                rendered.node_count,
-                                rendered.edge_count,
-                                rendered.graph_width,
-                                ctx.viewport_width,
-                            )));
-                            out.push(String::new());
-                            continue;
-                        }
-                        Err(e) => {
-                            out.push(ansi_256(196, &format!("✗ sketch: {e}")));
-                            // Show the source so the author can fix it.
-                        }
-                    }
-                }
                 out.extend(render_code_lines(lang, code));
                 out.push(String::new());
             }
@@ -3009,9 +2980,9 @@ pub fn render(content: &str, width: usize) -> RenderResult {
     render_with_viewport(content, width, width)
 }
 
-/// Render markdown with a separate viewport width for diagram blocks.
+/// Render markdown with a separate viewport width for wide blocks.
 /// `width` controls text wrapping; `viewport_width` is the full terminal width
-/// used for sketch diagrams that benefit from extra horizontal space.
+/// that tables may use.
 pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) -> RenderResult {
     let width = width.max(20);
     let viewport_width = viewport_width.max(width);
@@ -3040,7 +3011,6 @@ pub fn render_with_viewport(content: &str, width: usize, viewport_width: usize) 
     let mut lines = normalize_rendered_lines(&raw_lines);
 
     // Truncate lines exceeding viewport width.
-    // Use viewport_width (not prose width) so diagrams aren't clipped.
     for line in &mut lines {
         if visible_width(line) > viewport_width {
             *line = truncate_to_width(line, viewport_width);
@@ -3474,71 +3444,6 @@ mod tests {
             result.plain[2].starts_with("    words"),
             "wrapped text should align after the nested bullet: {:?}",
             result.plain
-        );
-    }
-
-    #[test]
-    fn sketch_blocks_render_as_diagrams() {
-        let content = "```sketch\n{\"nodes\": [{\"id\": \"a\", \"label\": \"API\"}, {\"id\": \"b\", \"label\": \"DB\", \"kind\": \"store\"}], \"edges\": [{\"from\": \"a\", \"to\": \"b\", \"label\": \"query\"}]}\n```";
-        let result = render_with_viewport(content, 72, 72);
-        let plain = result.plain.join("\n");
-        assert!(plain.contains("API"), "diagram nodes render");
-        assert!(plain.contains("query"), "edge label renders");
-        assert!(plain.contains("▼"), "edge arrow renders");
-        assert!(!plain.contains("nodes"), "raw JSON is not shown");
-    }
-
-    #[test]
-    fn sketch_blocks_too_wide_show_placeholder() {
-        let content = "```sketch\n{\"title\": \"big one\", \"nodes\": [{\"id\": \"a\", \"label\": \"A very long service name in a very wide box\"}, {\"id\": \"b\", \"label\": \"Another very long service name beside it\"}]}\n```";
-        let result = render_with_viewport(content, 30, 30);
-        let plain = result.plain.join("\n");
-        assert!(
-            plain.contains("◆ sketch `big one`"),
-            "placeholder names the diagram instead of truncating it"
-        );
-    }
-
-    #[test]
-    fn long_footnote_wraps_instead_of_suppressing_diagram() {
-        // A tiny graph whose footnote, on one line, is far wider than the
-        // viewport. The graph fits, so it must render with the note wrapped —
-        // not collapse to a placeholder because of the note's width.
-        let content = "```sketch\n{\"title\": \"tiny graph\", \"nodes\": [{\"id\": \"a\", \"label\": \"A\"}, {\"id\": \"b\", \"label\": \"B\"}], \"edges\": [{\"from\": \"a\", \"to\": \"b\"}], \"notes\": [{\"on\": \"a\", \"text\": \"this is a deliberately long footnote that on a single line would be far wider than the viewport and used to drag the whole diagram past the fit check even though the graph itself is tiny\"}]}\n```";
-        let result = render_with_viewport(content, 120, 120);
-        let plain = result.plain.join("\n");
-        assert!(
-            !plain.contains("◆ sketch"),
-            "a tiny graph must render even with a long footnote"
-        );
-        assert!(plain.contains("[1] A —"), "footnote anchor renders");
-        assert!(plain.contains("deliberately"), "footnote text is present");
-        // Footnotes use a readable caption width beneath the graph. Measure the
-        // footnote block independently from the wider branch layout above it.
-        let footnote_start = result
-            .plain
-            .iter()
-            .position(|line| line.contains("[1] A —"))
-            .expect("footnote anchor line");
-        let max = result.plain[footnote_start..]
-            .iter()
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(0);
-        assert!(
-            max <= 60,
-            "footnote wraps to caption width (~56), not the 120-col viewport (got {max})"
-        );
-    }
-
-    #[test]
-    fn sketch_blocks_with_errors_fail_loudly() {
-        let content = "```sketch\n{\"nodes\": [{\"id\": \"a\", \"label\": \"A\"}], \"edges\": [{\"from\": \"a\", \"to\": \"ghost\"}]}\n```";
-        let result = render_with_viewport(content, 72, 72);
-        let plain = result.plain.join("\n");
-        assert!(
-            plain.contains("✗ sketch:") && plain.contains("ghost"),
-            "error names the offending reference"
         );
     }
 

@@ -1,7 +1,6 @@
 pub mod activity;
 pub mod ansi;
 pub mod claude;
-pub mod diagram;
 pub mod markdown;
 pub mod nvim;
 pub mod output;
