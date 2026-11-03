@@ -131,6 +131,14 @@ struct SessionRecord {
 /// the one that wrote it: the pid must be alive and started at the recorded
 /// `procStart`, so a record left behind by a crash never claims a reused pid.
 pub fn live_sessions(profiles: &[Profile]) -> io::Result<Vec<LiveSession>> {
+    live_sessions_with(profiles, process_starts, process_config_dirs)
+}
+
+fn live_sessions_with(
+    profiles: &[Profile],
+    starts: impl FnOnce() -> io::Result<HashMap<u32, String>>,
+    config_dirs: impl FnOnce(&[u32]) -> HashMap<u32, PathBuf>,
+) -> io::Result<Vec<LiveSession>> {
     let records: Vec<(&Profile, SessionRecord)> = profiles
         .iter()
         .flat_map(|profile| {
@@ -142,12 +150,24 @@ pub fn live_sessions(profiles: &[Profile]) -> io::Result<Vec<LiveSession>> {
     if records.is_empty() {
         return Ok(Vec::new());
     }
-    let started = process_starts()?;
-    Ok(records
+    let started = starts()?;
+    let live: Vec<(&Profile, SessionRecord)> = records
         .into_iter()
         .filter(|(_, record)| {
             let recorded = record.proc_start.as_deref().map(normalize_start);
             recorded.is_some() && started.get(&record.pid) == recorded.as_ref()
+        })
+        .collect();
+    let mut pids: Vec<u32> = live.iter().map(|(_, record)| record.pid).collect();
+    pids.sort_unstable();
+    pids.dedup();
+    let runs_with = config_dirs(&pids);
+    let known = |dir: &Path| profiles.iter().any(|profile| same_dir(&profile.config_dir, dir));
+    Ok(live
+        .into_iter()
+        .filter(|(profile, record)| match runs_with.get(&record.pid) {
+            Some(dir) if known(dir) => same_dir(&profile.config_dir, dir),
+            _ => true,
         })
         .map(|(profile, record)| {
             let cwd = PathBuf::from(record.cwd.unwrap_or_default());
@@ -206,6 +226,37 @@ fn process_starts() -> io::Result<HashMap<u32, String>> {
             Some((pid.parse().ok()?, normalize_start(start)))
         })
         .collect())
+}
+
+fn process_config_dirs(pids: &[u32]) -> HashMap<u32, PathBuf> {
+    if pids.is_empty() {
+        return HashMap::new();
+    }
+    let list = pids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    let Ok(output) = Command::new("ps").args(["-E", "-o", "pid=,command=", "-p", &list]).output() else {
+        return HashMap::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, command) = line.trim().split_once(char::is_whitespace)?;
+            Some((pid.parse().ok()?, config_dir_in(command, &home())))
+        })
+        .collect()
+}
+
+fn config_dir_in(command: &str, home: &Path) -> PathBuf {
+    command
+        .split_whitespace()
+        .rev()
+        .find_map(|word| word.strip_prefix("CLAUDE_CONFIG_DIR="))
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".claude"))
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a.components().eq(b.components())
 }
 
 /// `ps` pads single-digit days with a space; compare starts word by word.
@@ -567,6 +618,57 @@ mod tests {
             }]
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_shared_by_two_profiles_belongs_to_the_one_its_process_runs_with() {
+        let dir = scratch("claude-shared-sessions");
+        let shared = dir.join("shared-sessions");
+        fs::create_dir_all(&shared).unwrap();
+        let profiles: Vec<Profile> = ["personal", "work"]
+            .iter()
+            .map(|name| {
+                let profile = Profile { name: name.to_string(), config_dir: dir.join(name) };
+                fs::create_dir_all(&profile.config_dir).unwrap();
+                std::os::unix::fs::symlink(&shared, profile.sessions_dir()).unwrap();
+                profile
+            })
+            .collect();
+        let cwd = Path::new("/work/repo");
+        session_record(&profiles[0], 41, "Mon Nov  2 18:39:52 2026", cwd, "busy");
+        session_record(&profiles[0], 42, "Mon Nov  2 18:40:00 2026", cwd, "idle");
+        let starts = || {
+            Ok(HashMap::from([
+                (41, "Mon Nov 2 18:39:52 2026".to_string()),
+                (42, "Mon Nov 2 18:40:00 2026".to_string()),
+            ]))
+        };
+        let work_dir = dir.join("work");
+        let personal_dir = dir.join("personal");
+        let config_dirs = |_: &[u32]| HashMap::from([(41, work_dir.clone()), (42, personal_dir.clone())]);
+
+        let sessions = live_sessions_with(&profiles, starts, config_dirs).unwrap();
+
+        let owners: Vec<(u32, String)> = sessions.iter().map(|session| (session.pid, session.profile.clone())).collect();
+        assert_eq!(owners.len(), 2);
+        assert!(owners.contains(&(41, "work".to_string())));
+        assert!(owners.contains(&(42, "personal".to_string())));
+        let work = sessions.iter().find(|session| session.pid == 41).unwrap();
+        assert_eq!(work.transcript, dir.join("work/projects/-work-repo/s-41.jsonl"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_config_directory_comes_from_the_environment_or_defaults_to_dot_claude() {
+        let home = Path::new("/Users/r");
+        assert_eq!(
+            config_dir_in("/Users/r/.local/bin/claude -n x CLAUDE_PROFILE=personal CLAUDE_CONFIG_DIR=/Users/r/.claude-personal TERM=xterm", home),
+            PathBuf::from("/Users/r/.claude-personal")
+        );
+        assert_eq!(
+            config_dir_in("/Users/r/.local/bin/claude -n x CLAUDE_PROFILE=work TERM=xterm", home),
+            PathBuf::from("/Users/r/.claude")
+        );
     }
 
     #[test]
