@@ -14,7 +14,7 @@ use super::layout::{fit_row, row_width, Mark, Piece, Row};
 use super::refs::{self, FileRef};
 use super::theme::Theme;
 
-pub(super) const KINDS: [&str; 4] = ["flow", "map", "states", "code"];
+pub(super) const KINDS: [&str; 2] = ["states", "code"];
 const COMMAND: &str = "explain-render";
 const TIMEOUT: Duration = Duration::from_secs(5);
 const CACHE_LIMIT: usize = 256;
@@ -252,7 +252,6 @@ fn highlighted(language: &str, text: &str, highlighter: &mut Option<(String, Hig
 fn style_of(tone: &str, theme: &Theme) -> Style {
     let style = Style::default();
     match tone {
-        "lane" => style.fg(theme.faint),
         "name" | "hot" => style.fg(theme.heading).add_modifier(Modifier::BOLD),
         "note" => style.fg(theme.quote).add_modifier(Modifier::ITALIC),
         "dim" => style.fg(theme.quote),
@@ -284,12 +283,12 @@ mod tests {
     fn tones_take_the_theme_colors() {
         let theme = Theme::default();
         let drawn = rows(
-            vec![vec![piece("│", "lane"), piece("Orders", "name"), piece("retries", "note")]],
+            vec![vec![piece("│", "border"), piece("Orders", "name"), piece("retries", "note")]],
             &theme,
             &mut Vec::new(),
         );
         let styles: Vec<_> = drawn[0].iter().map(|piece| piece.style).collect();
-        assert_eq!(styles[0].fg, Some(theme.faint));
+        assert_eq!(styles[0].fg, Some(theme.border));
         assert_eq!(styles[1].fg, Some(theme.heading));
         assert!(styles[1].add_modifier.contains(Modifier::BOLD));
         assert_eq!(styles[2].fg, Some(theme.quote));
