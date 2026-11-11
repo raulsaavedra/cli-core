@@ -324,12 +324,12 @@ mod diagrams {
 
     #[test]
     fn diagrams_are_found_with_the_room_their_fence_gets() {
-        let source = "```states\nA -> B\n```\n\n- item\n\n  ```code\n  ~/a.rs:1\n  ```\n\n```rust\nfn main() {}\n```\n";
+        let source = "```flow\nA -> B\n```\n\n- item\n\n  ```map\n  A -> B\n  ```\n\n```rust\nfn main() {}\n```\n";
         assert_eq!(
             diagrams(source, 40),
             vec![
-                ("states".to_string(), "A -> B".to_string(), 40),
-                ("code".to_string(), "~/a.rs:1".to_string(), 38),
+                ("flow".to_string(), "A -> B".to_string(), 40),
+                ("map".to_string(), "A -> B".to_string(), 38),
             ]
         );
     }
@@ -349,27 +349,27 @@ mod diagrams {
         let asked = RefCell::new(Vec::new());
         let draw = |kind: &str, source: &str, width: usize| -> Option<Drawing> {
             asked.borrow_mut().push((kind.to_string(), source.to_string(), width));
-            Some(vec![vec![drawn("┌───┐", "border")], vec![drawn("│ A │", "name")]])
+            Some(vec![vec![drawn("┌───┐", "lane")], vec![drawn("│ A │", "name")]])
         };
         let theme = Theme::default();
-        let result = render_with("Before.\n\n```states\nA -> B: go\n```\n\nAfter.", 40, &theme, &draw);
+        let result = render_with("Before.\n\n```flow\nA -> B: go\n```\n\nAfter.", 40, &theme, &draw);
         assert_eq!(result.plain(), vec!["Before.", "", "┌───┐", "│ A │", "", "After."]);
-        assert_eq!(*asked.borrow(), vec![("states".to_string(), "A -> B: go".to_string(), 40)]);
-        assert_eq!(result.lines[2].spans[1].style.fg, Some(theme.border));
+        assert_eq!(*asked.borrow(), vec![("flow".to_string(), "A -> B: go".to_string(), 40)]);
+        assert_eq!(result.lines[2].spans[1].style.fg, Some(theme.faint));
         assert_eq!(result.lines[3].spans[1].style.fg, Some(theme.heading));
     }
 
     #[test]
     fn a_failed_drawing_shows_the_fence_as_plain_code() {
         let theme = Theme::default();
-        let result = render_with("```states\nA -> B\n```\n", 40, &theme, &|_: &str, _: &str, _: usize| None);
+        let result = render_with("```map\nA -> B\n```\n", 40, &theme, &|_: &str, _: &str, _: usize| None);
         assert_eq!(result.plain(), vec!["  A -> B"]);
         assert_eq!(result.lines[0].spans[1].style.fg, Some(theme.code));
     }
 
     #[test]
     fn a_drawing_wider_than_the_column_shows_the_fence_as_plain_code() {
-        let draw = |_: &str, _: &str, _: usize| Some(vec![vec![drawn(&"─".repeat(41), "border")]]);
+        let draw = |_: &str, _: &str, _: usize| Some(vec![vec![drawn(&"─".repeat(41), "lane")]]);
         let result = render_with("```states\na -> b\n```\n", 40, &Theme::default(), &draw);
         assert_eq!(result.plain(), vec!["  a -> b"]);
     }
@@ -381,7 +381,7 @@ mod diagrams {
             *asked.borrow_mut() = width;
             Some(vec![vec![drawn("box", "plain")]])
         };
-        let result = render_with("- item\n\n  ```states\n  A -> B\n  ```\n", 40, &Theme::default(), &draw);
+        let result = render_with("- item\n\n  ```flow\n  A -> B\n  ```\n", 40, &Theme::default(), &draw);
         assert_eq!(result.plain(), vec!["• item", "  box"]);
         assert_eq!(*asked.borrow(), 38);
     }
@@ -510,11 +510,11 @@ mod excerpts {
             runs.set(runs.get() + 1);
             Some(Vec::new())
         };
-        drawings.draw("states", "A -> B", 40, draw);
-        drawings.draw("states", "A -> B", 40, draw);
+        drawings.draw("flow", "A -> B", 40, draw);
+        drawings.draw("flow", "A -> B", 40, draw);
         assert_eq!(runs.get(), 1);
-        let cached = ("states".to_string(), "A -> B".to_string(), 40);
-        let other = ("code".to_string(), "~/a.rs:1".to_string(), 40);
+        let cached = ("flow".to_string(), "A -> B".to_string(), 40);
+        let other = ("map".to_string(), "A -> B".to_string(), 40);
         assert_eq!(drawings.missing(vec![cached, other.clone()]), vec![other]);
     }
 }
