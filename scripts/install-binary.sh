@@ -17,9 +17,35 @@ install_cli_skills() {
 
 # Install a binary by renaming a prepared copy over the destination, so processes still
 # running the previous binary keep a valid code signature.
+signing_identity() {
+  if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+    echo "$CODESIGN_IDENTITY"
+    return
+  fi
+  security find-identity -v -p codesigning 2>/dev/null | awk '/"Apple Development: / { print $2; exit }'
+}
+
+sign_binary() {
+  local path="$1"
+  local identifier="$2"
+  local identity
+
+  if [ -z "$identifier" ]; then
+    codesign --force --sign - "$path" >/dev/null 2>&1 || true
+    return
+  fi
+  identity="$(signing_identity)"
+  if [ -n "$identity" ] && codesign --force --sign "$identity" --identifier "$identifier" "$path" >/dev/null 2>&1; then
+    return
+  fi
+  codesign --force --sign - --identifier "$identifier" "$path" >/dev/null 2>&1 || true
+  echo "Signed ${identifier} ad hoc: no Apple Development identity could sign it, so macOS asks for folder access again after each install" >&2
+}
+
 install_binary() {
   local src="$1"
   local dest="$2"
+  local identifier="${3:-}"
   local staged
 
   mkdir -p "$(dirname "$dest")"
@@ -32,7 +58,7 @@ install_binary() {
   fi
 
   if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
-    codesign --force --sign - "$staged" >/dev/null 2>&1 || true
+    sign_binary "$staged" "$identifier"
   fi
 
   mv -f "$staged" "$dest"
