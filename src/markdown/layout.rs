@@ -42,13 +42,6 @@ pub(super) fn row_width(row: &[Piece]) -> usize {
     row.iter().map(|piece| width(&piece.text)).sum()
 }
 
-pub(super) fn fit(text: &str, room: usize) -> String {
-    if width(text) <= room {
-        return text.to_string();
-    }
-    cut(text, room)
-}
-
 fn cut(text: &str, room: usize) -> String {
     if room == 0 {
         return String::new();
@@ -89,6 +82,91 @@ pub(super) fn fit_row(row: Row, room: usize) -> Row {
     kept
 }
 
+pub(super) fn wrap_row(row: Row, room: usize) -> Vec<Row> {
+    if room == 0 || row_width(&row) <= room {
+        return vec![row];
+    }
+    let cells: Vec<(char, usize, Style, Option<Mark>)> = row
+        .into_iter()
+        .flat_map(|piece| {
+            let style = piece.style;
+            let mark = piece.mark;
+            piece
+                .text
+                .chars()
+                .map(move |ch| (ch, ch.width().unwrap_or(0), style, mark))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while pos < cells.len() {
+        let mut used = 0;
+        let mut end = pos;
+        let mut seen_non_space = false;
+        let mut last_space: Option<usize> = None;
+        while end < cells.len() {
+            let (ch, size, _, _) = cells[end];
+            if used + size > room {
+                break;
+            }
+            if ch.is_whitespace() {
+                if seen_non_space {
+                    last_space = Some(end);
+                }
+            } else {
+                seen_non_space = true;
+            }
+            used += size;
+            end += 1;
+        }
+        if end == pos {
+            end += 1;
+        }
+        if end == cells.len() {
+            out.push(pack_cells(&cells[pos..end]));
+            break;
+        }
+        let (emit_end, next_pos) = if cells[end].0.is_whitespace() && seen_non_space {
+            (end, end + 1)
+        } else if let Some(space) = last_space {
+            (space, space + 1)
+        } else {
+            (end, end)
+        };
+        out.push(pack_cells(&cells[pos..emit_end]));
+        pos = next_pos;
+    }
+    out
+}
+
+fn pack_cells(cells: &[(char, usize, Style, Option<Mark>)]) -> Row {
+    let mut row: Row = Vec::new();
+    for &(ch, _, style, mark) in cells {
+        if let Some(last) = row.last_mut().filter(|piece| piece.style == style && piece.mark == mark) {
+            last.text.push(ch);
+        } else {
+            row.push(Piece::marked(ch.to_string(), style, mark));
+        }
+    }
+    row
+}
+
+fn split_at_width(text: &str, max_width: usize) -> usize {
+    let mut used = 0;
+    for (offset, character) in text.char_indices() {
+        let size = character.width().unwrap_or(0);
+        if used + size > max_width {
+            if offset > 0 {
+                return offset;
+            }
+            return character.len_utf8();
+        }
+        used += size;
+    }
+    text.len()
+}
+
 pub(super) fn wrap(pieces: &[Piece], room: usize, first: Row, rest: Row) -> Vec<Row> {
     let first_width = row_width(&first);
     let rest_width = row_width(&rest);
@@ -121,15 +199,25 @@ pub(super) fn wrap(pieces: &[Piece], room: usize, first: Row, rest: Row) -> Vec<
                 current.push(Piece::marked(" ", style, mark));
                 used += 1;
             }
-            if word_width > limit.saturating_sub(used) && !line_has_text {
-                let cut = fit(&word, limit.saturating_sub(used));
-                used += width(&cut);
-                current.push(Piece::marked(cut, piece.style, piece.mark));
-            } else {
-                used += word_width;
-                current.push(Piece::marked(word, piece.style, piece.mark));
+            let mut tail = word.as_str();
+            while !tail.is_empty() {
+                let avail = limit.saturating_sub(used).max(1);
+                if width(tail) <= avail {
+                    used += width(tail);
+                    current.push(Piece::marked(tail, piece.style, piece.mark));
+                    line_has_text = true;
+                    break;
+                }
+                let split = split_at_width(tail, avail);
+                let (head, next) = tail.split_at(split);
+                current.push(Piece::marked(head, piece.style, piece.mark));
+                rows.push(std::mem::take(&mut current));
+                current = rest.clone();
+                used = rest_width;
+                limit = room.max(rest_width + 4);
+                line_has_text = false;
+                tail = next;
             }
-            line_has_text = true;
         }
     }
     if line_has_text || rows.is_empty() {
@@ -158,20 +246,13 @@ fn split_words(text: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit, fit_row, wrap, Piece};
-    use ratatui::style::Style;
+    use super::{fit_row, wrap, wrap_row, Piece};
+    use ratatui::style::{Color, Style};
 
     fn texts(rows: &[Vec<Piece>]) -> Vec<String> {
         rows.iter()
             .map(|row| row.iter().map(|piece| piece.text.as_str()).collect())
             .collect()
-    }
-
-    #[test]
-    fn fit_cuts_with_an_ellipsis_inside_the_room() {
-        assert_eq!(fit("abcdef", 4), "abc…");
-        assert_eq!(fit("abc", 4), "abc");
-        assert_eq!(fit("abc", 0), "");
     }
 
     #[test]
@@ -182,9 +263,28 @@ mod tests {
     }
 
     #[test]
-    fn wrap_breaks_between_words_and_hangs_the_rest() {
+    fn wrap_row_breaks_styled_code_on_spaces_and_splits_oversized_tokens() {
+        let key = Style::default().fg(Color::Cyan);
+        let ident = Style::default().fg(Color::Yellow);
+        let row = vec![
+            Piece::new("  let ", key),
+            Piece::new("very_long_identifier_name", ident),
+        ];
+        let wrapped = wrap_row(row, 10);
+        assert_eq!(texts(&wrapped), vec!["  let", "very_long_", "identifier", "_name"]);
+        assert_eq!(wrapped[0][0].style, key);
+        assert_eq!(wrapped[1][0].style, ident);
+        assert_eq!(wrapped[2][0].style, ident);
+    }
+
+    #[test]
+    fn wrap_breaks_between_words_and_splits_oversized_tokens() {
         let pieces = vec![Piece::new("one two three four", Style::default())];
         let rows = wrap(&pieces, 9, vec![Piece::new("- ", Style::default())], vec![Piece::new("  ", Style::default())]);
         assert_eq!(texts(&rows), vec!["- one two", "  three", "  four"]);
+
+        let long = vec![Piece::new("abcdefghij", Style::default())];
+        let split = wrap(&long, 6, vec![Piece::new("- ", Style::default())], vec![Piece::new("  ", Style::default())]);
+        assert_eq!(texts(&split), vec!["- abcd", "  efgh", "  ij"]);
     }
 }

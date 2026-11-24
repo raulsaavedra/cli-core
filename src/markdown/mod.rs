@@ -10,7 +10,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use layout::{fit_row, row_width, width, wrap, Mark, Piece, Row};
+use layout::{row_width, width, wrap, wrap_row, Mark, Piece, Row};
 
 pub use refs::{definition_line, FileRef};
 pub use theme::Theme;
@@ -529,7 +529,7 @@ impl<'t> Writer<'t> {
         if drawn && self.diagram(&fence.language, source, indent) {
             return;
         }
-        let room = self.room.saturating_sub(indent + 2);
+        let room = self.room.saturating_sub(indent + 2).max(1);
         let highlighted = if drawn { None } else { code::highlight(&fence.language, source) };
         let lines: Vec<Row> = match highlighted {
             Some(tokens) => tokens
@@ -542,9 +542,11 @@ impl<'t> Writer<'t> {
                 .collect(),
         };
         for line in lines {
-            let mut row = vec![Piece::new(" ".repeat(indent + 2), Style::default())];
-            row.extend(fit_row(line, room));
-            self.rows.push(row);
+            for wrapped in wrap_row(line, room) {
+                let mut row = vec![Piece::new(" ".repeat(indent + 2), Style::default())];
+                row.extend(wrapped);
+                self.rows.push(row);
+            }
         }
     }
 

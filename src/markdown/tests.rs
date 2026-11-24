@@ -85,9 +85,26 @@ fn labeled_code_blocks_are_syntax_highlighted() {
 }
 
 #[test]
-fn long_code_lines_end_in_an_ellipsis() {
+fn long_code_lines_wrap_without_dropping_text() {
     let lines = plain("```rust\nlet value = some_function_with_a_long_name(argument);\n```\n", 24);
-    assert_eq!(lines, vec!["  let value = some_func…"]);
+    assert_eq!(
+        lines,
+        vec![
+            "  let value =",
+            "  some_function_with_a_l",
+            "  ong_name(argument);",
+        ]
+    );
+}
+
+#[test]
+fn oversized_tokens_wrap_in_prose_and_tables() {
+    let lines = plain("See FINANCIAL_DOCUMENTS_BASE_URL now.", 18);
+    assert_eq!(lines, vec!["See", "FINANCIAL_DOCUMENT", "S_BASE_URL now."]);
+    let table = plain("| Env |\n|---|\n| FINANCIAL_DOCUMENTS_BASE_URL |\n", 18);
+    assert!(table.iter().all(|line| !line.contains('…')));
+    assert!(table.iter().any(|line| line.contains("FINANCIAL_DOCU")));
+    assert!(table.iter().any(|line| line.contains("BASE_URL")));
 }
 
 #[test]
