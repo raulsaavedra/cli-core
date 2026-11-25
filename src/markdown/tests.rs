@@ -286,10 +286,15 @@ fn links_inside_tables_record_their_cell() {
 }
 
 #[test]
-fn backticked_full_paths_are_file_references() {
+fn backticked_full_paths_render_as_short_underlined_file_links() {
+    let theme = Theme::default();
     let result = rendered(
         "Open `~/src/app/create.ts#createOrder` and `/etc/hosts.conf:12`, not `src/main.rs` or `cargo test`.",
         200,
+    );
+    assert_eq!(
+        result.plain(),
+        vec!["Open createOrder and hosts.conf:12, not src/main.rs or cargo test."]
     );
     let refs: Vec<&FileRef> = result.file_refs.iter().collect();
     assert_eq!(refs.len(), 2);
@@ -297,9 +302,35 @@ fn backticked_full_paths_are_file_references() {
     assert_eq!(refs[0].symbol.as_deref(), Some("createOrder"));
     assert_eq!(refs[1].path, "/etc/hosts.conf");
     assert_eq!(refs[1].line, Some(12));
-    let occurrence = &result.file_ref_occurrences[0];
-    assert_eq!((occurrence.line, occurrence.start_col, occurrence.end_col), (0, 5, 36));
+    let first = &result.file_ref_occurrences[0];
+    assert_eq!((first.line, first.start_col, first.end_col), (0, 5, 16));
+    let second = &result.file_ref_occurrences[1];
+    assert_eq!((second.line, second.start_col, second.end_col), (0, 21, 34));
+    let span = result.lines[0]
+        .spans
+        .iter()
+        .find(|span| span.content == "createOrder")
+        .unwrap();
+    assert_eq!(span.style.fg, Some(theme.link));
+    assert!(span.style.add_modifier.contains(Modifier::UNDERLINED));
     assert!(result.links.is_empty());
+}
+
+#[test]
+fn extensionless_existing_files_are_file_links_while_directories_stay_code() {
+    let dir = std::env::temp_dir().join(format!("cli-core-mention-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("sync-claude-config");
+    std::fs::write(&script, "#!/bin/sh\n").unwrap();
+    let source = format!("Run `{}` inside `{}`.", script.display(), dir.display());
+    let result = rendered(&source, 200);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(result.plain(), vec![format!("Run sync-claude-config inside {}.", dir.display())]);
+    assert_eq!(result.file_refs.len(), 1);
+    assert_eq!(result.file_refs[0].path, script.display().to_string());
+    let occurrence = &result.file_ref_occurrences[0];
+    assert_eq!((occurrence.line, occurrence.start_col, occurrence.end_col), (0, 4, 22));
 }
 
 #[test]
@@ -433,7 +464,7 @@ mod diagrams {
                 )
             })
             .collect();
-        assert_eq!(places, [("/repo/b.rs", Some(1), 0, 4, 16), ("/repo/a.rs", Some(3), 3, 2, 8)]);
+        assert_eq!(places, [("/repo/b.rs", Some(1), 0, 4, 10), ("/repo/a.rs", Some(3), 3, 2, 8)]);
     }
 }
 

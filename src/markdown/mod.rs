@@ -308,11 +308,15 @@ impl<'t> Writer<'t> {
             self.push_piece(Piece::marked(code, style, mark));
             return;
         }
-        let mark = refs::mention(code).map(|file_ref| {
+        if let Some(file_ref) = refs::mention(code) {
+            let label = file_ref.display();
             self.files.push(file_ref);
-            Mark::File(self.files.len() - 1)
-        });
-        self.push_piece(Piece::marked(code, style, mark));
+            let mark = Some(Mark::File(self.files.len() - 1));
+            let link_style = self.style().fg(self.theme.link).add_modifier(Modifier::UNDERLINED);
+            self.push_piece(Piece::marked(label, link_style, mark));
+            return;
+        }
+        self.push_piece(Piece::marked(code, style, None));
     }
 
     fn event(&mut self, event: Event) {

@@ -29,11 +29,7 @@ impl FileRef {
     }
 
     pub fn resolved_path(&self) -> PathBuf {
-        match self.path.strip_prefix("~/") {
-            Some(rest) => home().join(rest),
-            None if self.path == "~" => home(),
-            None => PathBuf::from(&self.path),
-        }
+        resolve_home(&self.path)
     }
 
     pub fn target_line(&self) -> Option<usize> {
@@ -43,6 +39,14 @@ impl FileRef {
         let symbol = self.symbol.as_deref()?;
         let source = std::fs::read_to_string(self.resolved_path()).ok()?;
         definition_line(&source, symbol)
+    }
+}
+
+fn resolve_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => home().join(rest),
+        None if path == "~" => home(),
+        None => PathBuf::from(path),
     }
 }
 
@@ -62,11 +66,12 @@ pub(super) fn mention(code: &str) -> Option<FileRef> {
         .find(|character: char| character.is_whitespace() || character == '#' || character == ':')
         .unwrap_or(code.len());
     let path = &code[..end];
-    let (stem, extension) = path.rsplit_once('.')?;
-    if stem.len() < start + 1
-        || extension.is_empty()
-        || !extension.chars().all(|character| character.is_ascii_alphanumeric())
-    {
+    let has_extension = path.rsplit_once('.').is_some_and(|(stem, extension)| {
+        stem.len() > start
+            && !extension.is_empty()
+            && extension.chars().all(|character| character.is_ascii_alphanumeric())
+    });
+    if !has_extension && !resolve_home(path).is_file() {
         return None;
     }
     let rest = &code[end..];
@@ -77,13 +82,12 @@ pub(super) fn mention(code: &str) -> Option<FileRef> {
             return None;
         }
         (number.parse().ok(), None)
-    } else if let Some(name) = rest.strip_prefix('#') {
+    } else {
+        let name = rest.strip_prefix('#')?;
         if !is_symbol(name) {
             return None;
         }
         (None, Some(name.to_string()))
-    } else {
-        return None;
     };
     Some(FileRef {
         path: path.to_string(),
