@@ -78,16 +78,16 @@ pub(super) fn mention(code: &str) -> Option<FileRef> {
     let (line, symbol) = if rest.is_empty() {
         (None, None)
     } else if let Some(number) = rest.strip_prefix(':') {
-        if number.is_empty() || !number.chars().all(|character| character.is_ascii_digit()) {
-            return None;
-        }
-        (number.parse().ok(), None)
+        (Some(parse_colon_line(number)?), None)
     } else {
         let name = rest.strip_prefix('#')?;
-        if !is_symbol(name) {
+        if let Some(line) = parse_line_anchor(name) {
+            (Some(line), None)
+        } else if is_symbol(name) {
+            (None, Some(name.to_string()))
+        } else {
             return None;
         }
-        (None, Some(name.to_string()))
     };
     Some(FileRef {
         path: path.to_string(),
@@ -110,9 +110,8 @@ pub(super) fn file_link(href: &str, label: &str) -> Option<FileRef> {
     let (line, symbol) = match anchor {
         None | Some("") => (None, None),
         Some(anchor) => {
-            let digits = anchor.strip_prefix('L').unwrap_or(anchor);
-            if !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()) {
-                (digits.parse().ok(), None)
+            if let Some(line) = parse_line_anchor(anchor) {
+                (Some(line), None)
             } else if is_symbol(anchor) {
                 (None, Some(anchor.to_string()))
             } else {
@@ -127,6 +126,44 @@ pub(super) fn file_link(href: &str, label: &str) -> Option<FileRef> {
         symbol,
         label: (!label.is_empty()).then(|| label.to_string()),
     })
+}
+
+fn parse_line_anchor(anchor: &str) -> Option<usize> {
+    let (first, second) = match anchor.split_once('-') {
+        Some((first, second)) => (first, Some(second)),
+        None => (anchor, None),
+    };
+    let start = parse_line_number(first)?;
+    if let Some(end) = second {
+        parse_line_number(end)?;
+    }
+    Some(start)
+}
+
+fn parse_line_number(part: &str) -> Option<usize> {
+    let digits = part.strip_prefix('L').unwrap_or(part);
+    (!digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+        .filter(|&line| line > 0)
+}
+
+fn parse_colon_line(rest: &str) -> Option<usize> {
+    let first_end = rest.find(|character: char| !character.is_ascii_digit()).unwrap_or(rest.len());
+    if first_end == 0 {
+        return None;
+    }
+    let mut tail = &rest[first_end..];
+    while !tail.is_empty() {
+        let next = tail.strip_prefix(['-', ':', ','])?;
+        let next = next.strip_prefix('L').unwrap_or(next);
+        let digits = next.find(|character: char| !character.is_ascii_digit()).unwrap_or(next.len());
+        if digits == 0 {
+            return None;
+        }
+        tail = &next[digits..];
+    }
+    rest[..first_end].parse().ok().filter(|&line| line > 0)
 }
 
 fn decode(text: &str) -> String {
@@ -312,6 +349,10 @@ mod tests {
     fn mentions_take_full_paths_with_an_extension() {
         assert_eq!(mention("/src/app.rs"), Some(reference("/src/app.rs", None, None)));
         assert_eq!(mention("~/src/app.rs:42"), Some(reference("~/src/app.rs", Some(42), None)));
+        assert_eq!(mention("~/src/app.rs:42-50"), Some(reference("~/src/app.rs", Some(42), None)));
+        assert_eq!(mention("~/src/app.rs:42:5"), Some(reference("~/src/app.rs", Some(42), None)));
+        assert_eq!(mention("~/src/app.rs#L42"), Some(reference("~/src/app.rs", Some(42), None)));
+        assert_eq!(mention("~/src/app.rs#L42-L50"), Some(reference("~/src/app.rs", Some(42), None)));
         assert_eq!(
             mention("~/src/create.ts#Store.add"),
             Some(reference("~/src/create.ts", None, Some("Store.add")))
@@ -319,6 +360,7 @@ mod tests {
         assert_eq!(mention("src/app.rs"), None);
         assert_eq!(mention("/usr/bin"), None);
         assert_eq!(mention("~/src/app.rs:x"), None);
+        assert_eq!(mention("~/src/app.rs:42-"), None);
         assert_eq!(mention("/a b.rs"), None);
         assert_eq!(mention("cargo test"), None);
     }
@@ -329,6 +371,12 @@ mod tests {
         assert_eq!(found.path, "/Users/r/src/a b.rs");
         assert_eq!(found.line, Some(12));
         assert_eq!(found.label.as_deref(), Some("the handler"));
+        let range = file_link("file:///Users/r/src/a.rs#L12-L24", "the block").unwrap();
+        assert_eq!(range.path, "/Users/r/src/a.rs");
+        assert_eq!(range.line, Some(12));
+        assert_eq!(range.symbol, None);
+        assert_eq!(file_link("file:///x/y.rs#L12-24", "").unwrap().line, Some(12));
+        assert_eq!(file_link("file:///x/y.rs#12-24", "").unwrap().line, Some(12));
         assert_eq!(file_link("file:///x/y.ts#createOrder", "").unwrap().symbol.as_deref(), Some("createOrder"));
         assert_eq!(file_link("https://example.com", "x"), None);
     }
